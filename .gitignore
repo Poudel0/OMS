@@ -1,0 +1,8 @@
+*.md
+*.xlsx
+.idea/
+.github/
+Docs/
+.log
+bench*
+*lock*
