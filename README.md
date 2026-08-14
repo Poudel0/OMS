@@ -20,9 +20,19 @@ before the next one starts. Current state:
 - [x] WAL shipping to a passive follower, manual failover
 - [x] Tracing (OpenTelemetry → Jaeger) + metrics (Prometheus)
 
-See [`docs/adr/`](docs/adr/) for the design decisions behind each piece as
-they land, and [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md) for measured
-numbers — nothing in that file is a target, only what was actually measured.
+**Documentation:** [`docs/`](docs/) is indexed — start at
+[`docs/README.md`](docs/README.md).
+
+| | |
+|---|---|
+| [`docs/architecture.md`](docs/architecture.md) | The writeup: what this is, and the four times a measurement contradicted the design |
+| [`docs/domain.md`](docs/domain.md) | The trading domain, for a reader who knows software but not markets |
+| [`docs/technical.md`](docs/technical.md) | Code map, invariants, formats, concurrency rules, every constant |
+| [`docs/decisions.md`](docs/decisions.md) | 15 decisions with pros/cons, 8 problems with what they cost |
+| [`docs/gaps.md`](docs/gaps.md) | Every limitation, by severity, with the known fix |
+| [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md) | Every number and its conditions. Nothing is a target |
+| [`docs/failover.md`](docs/failover.md) | Manual promotion runbook |
+| [`docs/adr/`](docs/adr/) | ADR-001…006, the decision records |
 
 **Headline, measured:** 1,383 orders/sec sustained over 60s, p50 38.7ms, p99
 130ms — durable, settled double-entry, and replicated to a live follower, on one
