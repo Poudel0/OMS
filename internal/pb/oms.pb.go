@@ -21,6 +21,56 @@ const (
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
 
+// WALRecordKind mirrors the two mutations the log replays.
+type WALRecordKind int32
+
+const (
+	WALRecordKind_WAL_RECORD_KIND_UNSPECIFIED WALRecordKind = 0
+	WALRecordKind_WAL_RECORD_KIND_SUBMIT      WALRecordKind = 1
+	WALRecordKind_WAL_RECORD_KIND_CANCEL      WALRecordKind = 2
+)
+
+// Enum value maps for WALRecordKind.
+var (
+	WALRecordKind_name = map[int32]string{
+		0: "WAL_RECORD_KIND_UNSPECIFIED",
+		1: "WAL_RECORD_KIND_SUBMIT",
+		2: "WAL_RECORD_KIND_CANCEL",
+	}
+	WALRecordKind_value = map[string]int32{
+		"WAL_RECORD_KIND_UNSPECIFIED": 0,
+		"WAL_RECORD_KIND_SUBMIT":      1,
+		"WAL_RECORD_KIND_CANCEL":      2,
+	}
+)
+
+func (x WALRecordKind) Enum() *WALRecordKind {
+	p := new(WALRecordKind)
+	*p = x
+	return p
+}
+
+func (x WALRecordKind) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (WALRecordKind) Descriptor() protoreflect.EnumDescriptor {
+	return file_dhukuti_oms_v1_oms_proto_enumTypes[0].Descriptor()
+}
+
+func (WALRecordKind) Type() protoreflect.EnumType {
+	return &file_dhukuti_oms_v1_oms_proto_enumTypes[0]
+}
+
+func (x WALRecordKind) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use WALRecordKind.Descriptor instead.
+func (WALRecordKind) EnumDescriptor() ([]byte, []int) {
+	return file_dhukuti_oms_v1_oms_proto_rawDescGZIP(), []int{0}
+}
+
 // Side is the direction of an order. The unspecified zero value is invalid
 // rather than defaulting, so a caller that forgets the field is rejected
 // instead of silently having its order treated as a buy.
@@ -57,11 +107,11 @@ func (x Side) String() string {
 }
 
 func (Side) Descriptor() protoreflect.EnumDescriptor {
-	return file_dhukuti_oms_v1_oms_proto_enumTypes[0].Descriptor()
+	return file_dhukuti_oms_v1_oms_proto_enumTypes[1].Descriptor()
 }
 
 func (Side) Type() protoreflect.EnumType {
-	return &file_dhukuti_oms_v1_oms_proto_enumTypes[0]
+	return &file_dhukuti_oms_v1_oms_proto_enumTypes[1]
 }
 
 func (x Side) Number() protoreflect.EnumNumber {
@@ -70,7 +120,7 @@ func (x Side) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use Side.Descriptor instead.
 func (Side) EnumDescriptor() ([]byte, []int) {
-	return file_dhukuti_oms_v1_oms_proto_rawDescGZIP(), []int{0}
+	return file_dhukuti_oms_v1_oms_proto_rawDescGZIP(), []int{1}
 }
 
 // OrderType is LIMIT or MARKET. Unspecified is invalid, same reasoning as Side.
@@ -107,11 +157,11 @@ func (x OrderType) String() string {
 }
 
 func (OrderType) Descriptor() protoreflect.EnumDescriptor {
-	return file_dhukuti_oms_v1_oms_proto_enumTypes[1].Descriptor()
+	return file_dhukuti_oms_v1_oms_proto_enumTypes[2].Descriptor()
 }
 
 func (OrderType) Type() protoreflect.EnumType {
-	return &file_dhukuti_oms_v1_oms_proto_enumTypes[1]
+	return &file_dhukuti_oms_v1_oms_proto_enumTypes[2]
 }
 
 func (x OrderType) Number() protoreflect.EnumNumber {
@@ -120,7 +170,757 @@ func (x OrderType) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use OrderType.Descriptor instead.
 func (OrderType) EnumDescriptor() ([]byte, []int) {
+	return file_dhukuti_oms_v1_oms_proto_rawDescGZIP(), []int{2}
+}
+
+type GetBookSnapshotRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Symbol        string                 `protobuf:"bytes,1,opt,name=symbol,proto3" json:"symbol,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GetBookSnapshotRequest) Reset() {
+	*x = GetBookSnapshotRequest{}
+	mi := &file_dhukuti_oms_v1_oms_proto_msgTypes[0]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetBookSnapshotRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetBookSnapshotRequest) ProtoMessage() {}
+
+func (x *GetBookSnapshotRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_dhukuti_oms_v1_oms_proto_msgTypes[0]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetBookSnapshotRequest.ProtoReflect.Descriptor instead.
+func (*GetBookSnapshotRequest) Descriptor() ([]byte, []int) {
+	return file_dhukuti_oms_v1_oms_proto_rawDescGZIP(), []int{0}
+}
+
+func (x *GetBookSnapshotRequest) GetSymbol() string {
+	if x != nil {
+		return x.Symbol
+	}
+	return ""
+}
+
+type GetBookSnapshotResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// depth_json is L2 depth: total resting quantity per price, both sides, as
+	// JSON. Aggregated rather than per-order, so it exposes no queue positions.
+	DepthJson string `protobuf:"bytes,1,opt,name=depth_json,json=depthJson,proto3" json:"depth_json,omitempty"`
+	// log_position is how far this node's log had advanced when the snapshot was
+	// taken, which is what makes two nodes' snapshots comparable.
+	LogPosition   int64 `protobuf:"varint,2,opt,name=log_position,json=logPosition,proto3" json:"log_position,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GetBookSnapshotResponse) Reset() {
+	*x = GetBookSnapshotResponse{}
+	mi := &file_dhukuti_oms_v1_oms_proto_msgTypes[1]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetBookSnapshotResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetBookSnapshotResponse) ProtoMessage() {}
+
+func (x *GetBookSnapshotResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_dhukuti_oms_v1_oms_proto_msgTypes[1]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetBookSnapshotResponse.ProtoReflect.Descriptor instead.
+func (*GetBookSnapshotResponse) Descriptor() ([]byte, []int) {
 	return file_dhukuti_oms_v1_oms_proto_rawDescGZIP(), []int{1}
+}
+
+func (x *GetBookSnapshotResponse) GetDepthJson() string {
+	if x != nil {
+		return x.DepthJson
+	}
+	return ""
+}
+
+func (x *GetBookSnapshotResponse) GetLogPosition() int64 {
+	if x != nil {
+		return x.LogPosition
+	}
+	return 0
+}
+
+type ListSymbolsRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ListSymbolsRequest) Reset() {
+	*x = ListSymbolsRequest{}
+	mi := &file_dhukuti_oms_v1_oms_proto_msgTypes[2]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ListSymbolsRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ListSymbolsRequest) ProtoMessage() {}
+
+func (x *ListSymbolsRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_dhukuti_oms_v1_oms_proto_msgTypes[2]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ListSymbolsRequest.ProtoReflect.Descriptor instead.
+func (*ListSymbolsRequest) Descriptor() ([]byte, []int) {
+	return file_dhukuti_oms_v1_oms_proto_rawDescGZIP(), []int{2}
+}
+
+type ListSymbolsResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Symbols       []string               `protobuf:"bytes,1,rep,name=symbols,proto3" json:"symbols,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ListSymbolsResponse) Reset() {
+	*x = ListSymbolsResponse{}
+	mi := &file_dhukuti_oms_v1_oms_proto_msgTypes[3]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ListSymbolsResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ListSymbolsResponse) ProtoMessage() {}
+
+func (x *ListSymbolsResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_dhukuti_oms_v1_oms_proto_msgTypes[3]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ListSymbolsResponse.ProtoReflect.Descriptor instead.
+func (*ListSymbolsResponse) Descriptor() ([]byte, []int) {
+	return file_dhukuti_oms_v1_oms_proto_rawDescGZIP(), []int{3}
+}
+
+func (x *ListSymbolsResponse) GetSymbols() []string {
+	if x != nil {
+		return x.Symbols
+	}
+	return nil
+}
+
+type StreamWALRequest struct {
+	state  protoimpl.MessageState `protogen:"open.v1"`
+	Symbol string                 `protobuf:"bytes,1,opt,name=symbol,proto3" json:"symbol,omitempty"`
+	// after_position streams records strictly above this log position. A follower
+	// sends the highest position it has durably applied, so 0 means "from the
+	// beginning" and there is no separate full-copy step -- the log IS the
+	// snapshot.
+	AfterPosition int64 `protobuf:"varint,2,opt,name=after_position,json=afterPosition,proto3" json:"after_position,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *StreamWALRequest) Reset() {
+	*x = StreamWALRequest{}
+	mi := &file_dhukuti_oms_v1_oms_proto_msgTypes[4]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *StreamWALRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*StreamWALRequest) ProtoMessage() {}
+
+func (x *StreamWALRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_dhukuti_oms_v1_oms_proto_msgTypes[4]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use StreamWALRequest.ProtoReflect.Descriptor instead.
+func (*StreamWALRequest) Descriptor() ([]byte, []int) {
+	return file_dhukuti_oms_v1_oms_proto_rawDescGZIP(), []int{4}
+}
+
+func (x *StreamWALRequest) GetSymbol() string {
+	if x != nil {
+		return x.Symbol
+	}
+	return ""
+}
+
+func (x *StreamWALRequest) GetAfterPosition() int64 {
+	if x != nil {
+		return x.AfterPosition
+	}
+	return 0
+}
+
+type WALRecord struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// position is the record's log position, assigned by the primary. The
+	// follower stores records under the primary's positions, never its own:
+	// renumbering would make the follower's log a different log and break resume.
+	Position         int64         `protobuf:"varint,1,opt,name=position,proto3" json:"position,omitempty"`
+	LoggedAtUnixNano int64         `protobuf:"varint,2,opt,name=logged_at_unix_nano,json=loggedAtUnixNano,proto3" json:"logged_at_unix_nano,omitempty"`
+	Kind             WALRecordKind `protobuf:"varint,3,opt,name=kind,proto3,enum=dhukuti.oms.v1.WALRecordKind" json:"kind,omitempty"`
+	// Set when kind is SUBMIT.
+	Order *Order `protobuf:"bytes,4,opt,name=order,proto3" json:"order,omitempty"`
+	// Set when kind is CANCEL.
+	CancelOrderId int64 `protobuf:"varint,5,opt,name=cancel_order_id,json=cancelOrderId,proto3" json:"cancel_order_id,omitempty"`
+	// cancel_requested_by carries the ownership constraint the cancel was checked
+	// against. It has to travel: the follower re-evaluates the constraint, so
+	// omitting it would let a cancel that the primary refused succeed on the
+	// follower, and the two books would diverge.
+	CancelRequestedBy string `protobuf:"bytes,6,opt,name=cancel_requested_by,json=cancelRequestedBy,proto3" json:"cancel_requested_by,omitempty"`
+	unknownFields     protoimpl.UnknownFields
+	sizeCache         protoimpl.SizeCache
+}
+
+func (x *WALRecord) Reset() {
+	*x = WALRecord{}
+	mi := &file_dhukuti_oms_v1_oms_proto_msgTypes[5]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *WALRecord) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*WALRecord) ProtoMessage() {}
+
+func (x *WALRecord) ProtoReflect() protoreflect.Message {
+	mi := &file_dhukuti_oms_v1_oms_proto_msgTypes[5]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use WALRecord.ProtoReflect.Descriptor instead.
+func (*WALRecord) Descriptor() ([]byte, []int) {
+	return file_dhukuti_oms_v1_oms_proto_rawDescGZIP(), []int{5}
+}
+
+func (x *WALRecord) GetPosition() int64 {
+	if x != nil {
+		return x.Position
+	}
+	return 0
+}
+
+func (x *WALRecord) GetLoggedAtUnixNano() int64 {
+	if x != nil {
+		return x.LoggedAtUnixNano
+	}
+	return 0
+}
+
+func (x *WALRecord) GetKind() WALRecordKind {
+	if x != nil {
+		return x.Kind
+	}
+	return WALRecordKind_WAL_RECORD_KIND_UNSPECIFIED
+}
+
+func (x *WALRecord) GetOrder() *Order {
+	if x != nil {
+		return x.Order
+	}
+	return nil
+}
+
+func (x *WALRecord) GetCancelOrderId() int64 {
+	if x != nil {
+		return x.CancelOrderId
+	}
+	return 0
+}
+
+func (x *WALRecord) GetCancelRequestedBy() string {
+	if x != nil {
+		return x.CancelRequestedBy
+	}
+	return ""
+}
+
+// Order is an order as the log recorded it, with the venue-assigned id already
+// in place.
+type Order struct {
+	state            protoimpl.MessageState `protogen:"open.v1"`
+	OrderId          int64                  `protobuf:"varint,1,opt,name=order_id,json=orderId,proto3" json:"order_id,omitempty"`
+	Symbol           string                 `protobuf:"bytes,2,opt,name=symbol,proto3" json:"symbol,omitempty"`
+	AccountId        string                 `protobuf:"bytes,3,opt,name=account_id,json=accountId,proto3" json:"account_id,omitempty"`
+	Type             OrderType              `protobuf:"varint,4,opt,name=type,proto3,enum=dhukuti.oms.v1.OrderType" json:"type,omitempty"`
+	Price            int64                  `protobuf:"varint,5,opt,name=price,proto3" json:"price,omitempty"`
+	Quantity         int64                  `protobuf:"varint,6,opt,name=quantity,proto3" json:"quantity,omitempty"`
+	Side             Side                   `protobuf:"varint,7,opt,name=side,proto3,enum=dhukuti.oms.v1.Side" json:"side,omitempty"`
+	PlacedAtUnixNano int64                  `protobuf:"varint,8,opt,name=placed_at_unix_nano,json=placedAtUnixNano,proto3" json:"placed_at_unix_nano,omitempty"`
+	unknownFields    protoimpl.UnknownFields
+	sizeCache        protoimpl.SizeCache
+}
+
+func (x *Order) Reset() {
+	*x = Order{}
+	mi := &file_dhukuti_oms_v1_oms_proto_msgTypes[6]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Order) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Order) ProtoMessage() {}
+
+func (x *Order) ProtoReflect() protoreflect.Message {
+	mi := &file_dhukuti_oms_v1_oms_proto_msgTypes[6]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Order.ProtoReflect.Descriptor instead.
+func (*Order) Descriptor() ([]byte, []int) {
+	return file_dhukuti_oms_v1_oms_proto_rawDescGZIP(), []int{6}
+}
+
+func (x *Order) GetOrderId() int64 {
+	if x != nil {
+		return x.OrderId
+	}
+	return 0
+}
+
+func (x *Order) GetSymbol() string {
+	if x != nil {
+		return x.Symbol
+	}
+	return ""
+}
+
+func (x *Order) GetAccountId() string {
+	if x != nil {
+		return x.AccountId
+	}
+	return ""
+}
+
+func (x *Order) GetType() OrderType {
+	if x != nil {
+		return x.Type
+	}
+	return OrderType_ORDER_TYPE_UNSPECIFIED
+}
+
+func (x *Order) GetPrice() int64 {
+	if x != nil {
+		return x.Price
+	}
+	return 0
+}
+
+func (x *Order) GetQuantity() int64 {
+	if x != nil {
+		return x.Quantity
+	}
+	return 0
+}
+
+func (x *Order) GetSide() Side {
+	if x != nil {
+		return x.Side
+	}
+	return Side_SIDE_UNSPECIFIED
+}
+
+func (x *Order) GetPlacedAtUnixNano() int64 {
+	if x != nil {
+		return x.PlacedAtUnixNano
+	}
+	return 0
+}
+
+type WALBatch struct {
+	state   protoimpl.MessageState `protogen:"open.v1"`
+	Records []*WALRecord           `protobuf:"bytes,1,rep,name=records,proto3" json:"records,omitempty"`
+	// primary_last_position is the highest position the primary had when it sent
+	// this batch, so a follower can compute its own lag without a round trip.
+	PrimaryLastPosition int64 `protobuf:"varint,2,opt,name=primary_last_position,json=primaryLastPosition,proto3" json:"primary_last_position,omitempty"`
+	unknownFields       protoimpl.UnknownFields
+	sizeCache           protoimpl.SizeCache
+}
+
+func (x *WALBatch) Reset() {
+	*x = WALBatch{}
+	mi := &file_dhukuti_oms_v1_oms_proto_msgTypes[7]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *WALBatch) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*WALBatch) ProtoMessage() {}
+
+func (x *WALBatch) ProtoReflect() protoreflect.Message {
+	mi := &file_dhukuti_oms_v1_oms_proto_msgTypes[7]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use WALBatch.ProtoReflect.Descriptor instead.
+func (*WALBatch) Descriptor() ([]byte, []int) {
+	return file_dhukuti_oms_v1_oms_proto_rawDescGZIP(), []int{7}
+}
+
+func (x *WALBatch) GetRecords() []*WALRecord {
+	if x != nil {
+		return x.Records
+	}
+	return nil
+}
+
+func (x *WALBatch) GetPrimaryLastPosition() int64 {
+	if x != nil {
+		return x.PrimaryLastPosition
+	}
+	return 0
+}
+
+type ReportProgressRequest struct {
+	state           protoimpl.MessageState `protogen:"open.v1"`
+	Symbol          string                 `protobuf:"bytes,1,opt,name=symbol,proto3" json:"symbol,omitempty"`
+	AppliedPosition int64                  `protobuf:"varint,2,opt,name=applied_position,json=appliedPosition,proto3" json:"applied_position,omitempty"`
+	// applied_at is the logged_at of the record at applied_position, which is what
+	// turns a lag in records into a lag in time.
+	AppliedRecordLoggedAtUnixNano int64 `protobuf:"varint,3,opt,name=applied_record_logged_at_unix_nano,json=appliedRecordLoggedAtUnixNano,proto3" json:"applied_record_logged_at_unix_nano,omitempty"`
+	unknownFields                 protoimpl.UnknownFields
+	sizeCache                     protoimpl.SizeCache
+}
+
+func (x *ReportProgressRequest) Reset() {
+	*x = ReportProgressRequest{}
+	mi := &file_dhukuti_oms_v1_oms_proto_msgTypes[8]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ReportProgressRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ReportProgressRequest) ProtoMessage() {}
+
+func (x *ReportProgressRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_dhukuti_oms_v1_oms_proto_msgTypes[8]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ReportProgressRequest.ProtoReflect.Descriptor instead.
+func (*ReportProgressRequest) Descriptor() ([]byte, []int) {
+	return file_dhukuti_oms_v1_oms_proto_rawDescGZIP(), []int{8}
+}
+
+func (x *ReportProgressRequest) GetSymbol() string {
+	if x != nil {
+		return x.Symbol
+	}
+	return ""
+}
+
+func (x *ReportProgressRequest) GetAppliedPosition() int64 {
+	if x != nil {
+		return x.AppliedPosition
+	}
+	return 0
+}
+
+func (x *ReportProgressRequest) GetAppliedRecordLoggedAtUnixNano() int64 {
+	if x != nil {
+		return x.AppliedRecordLoggedAtUnixNano
+	}
+	return 0
+}
+
+type ReportProgressResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ReportProgressResponse) Reset() {
+	*x = ReportProgressResponse{}
+	mi := &file_dhukuti_oms_v1_oms_proto_msgTypes[9]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ReportProgressResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ReportProgressResponse) ProtoMessage() {}
+
+func (x *ReportProgressResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_dhukuti_oms_v1_oms_proto_msgTypes[9]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ReportProgressResponse.ProtoReflect.Descriptor instead.
+func (*ReportProgressResponse) Descriptor() ([]byte, []int) {
+	return file_dhukuti_oms_v1_oms_proto_rawDescGZIP(), []int{9}
+}
+
+type ReplicationStatusRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ReplicationStatusRequest) Reset() {
+	*x = ReplicationStatusRequest{}
+	mi := &file_dhukuti_oms_v1_oms_proto_msgTypes[10]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ReplicationStatusRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ReplicationStatusRequest) ProtoMessage() {}
+
+func (x *ReplicationStatusRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_dhukuti_oms_v1_oms_proto_msgTypes[10]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ReplicationStatusRequest.ProtoReflect.Descriptor instead.
+func (*ReplicationStatusRequest) Descriptor() ([]byte, []int) {
+	return file_dhukuti_oms_v1_oms_proto_rawDescGZIP(), []int{10}
+}
+
+type SymbolLag struct {
+	state            protoimpl.MessageState `protogen:"open.v1"`
+	Symbol           string                 `protobuf:"bytes,1,opt,name=symbol,proto3" json:"symbol,omitempty"`
+	PrimaryPosition  int64                  `protobuf:"varint,2,opt,name=primary_position,json=primaryPosition,proto3" json:"primary_position,omitempty"`
+	FollowerPosition int64                  `protobuf:"varint,3,opt,name=follower_position,json=followerPosition,proto3" json:"follower_position,omitempty"`
+	// records_behind is primary_position - follower_position.
+	RecordsBehind int64 `protobuf:"varint,4,opt,name=records_behind,json=recordsBehind,proto3" json:"records_behind,omitempty"`
+	// millis_behind is now minus the logged_at of the follower's last applied
+	// record. It is 0 when no follower has ever reported.
+	MillisBehind  int64 `protobuf:"varint,5,opt,name=millis_behind,json=millisBehind,proto3" json:"millis_behind,omitempty"`
+	FollowerSeen  bool  `protobuf:"varint,6,opt,name=follower_seen,json=followerSeen,proto3" json:"follower_seen,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SymbolLag) Reset() {
+	*x = SymbolLag{}
+	mi := &file_dhukuti_oms_v1_oms_proto_msgTypes[11]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SymbolLag) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SymbolLag) ProtoMessage() {}
+
+func (x *SymbolLag) ProtoReflect() protoreflect.Message {
+	mi := &file_dhukuti_oms_v1_oms_proto_msgTypes[11]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SymbolLag.ProtoReflect.Descriptor instead.
+func (*SymbolLag) Descriptor() ([]byte, []int) {
+	return file_dhukuti_oms_v1_oms_proto_rawDescGZIP(), []int{11}
+}
+
+func (x *SymbolLag) GetSymbol() string {
+	if x != nil {
+		return x.Symbol
+	}
+	return ""
+}
+
+func (x *SymbolLag) GetPrimaryPosition() int64 {
+	if x != nil {
+		return x.PrimaryPosition
+	}
+	return 0
+}
+
+func (x *SymbolLag) GetFollowerPosition() int64 {
+	if x != nil {
+		return x.FollowerPosition
+	}
+	return 0
+}
+
+func (x *SymbolLag) GetRecordsBehind() int64 {
+	if x != nil {
+		return x.RecordsBehind
+	}
+	return 0
+}
+
+func (x *SymbolLag) GetMillisBehind() int64 {
+	if x != nil {
+		return x.MillisBehind
+	}
+	return 0
+}
+
+func (x *SymbolLag) GetFollowerSeen() bool {
+	if x != nil {
+		return x.FollowerSeen
+	}
+	return false
+}
+
+type ReplicationStatusResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Symbols       []*SymbolLag           `protobuf:"bytes,1,rep,name=symbols,proto3" json:"symbols,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ReplicationStatusResponse) Reset() {
+	*x = ReplicationStatusResponse{}
+	mi := &file_dhukuti_oms_v1_oms_proto_msgTypes[12]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ReplicationStatusResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ReplicationStatusResponse) ProtoMessage() {}
+
+func (x *ReplicationStatusResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_dhukuti_oms_v1_oms_proto_msgTypes[12]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ReplicationStatusResponse.ProtoReflect.Descriptor instead.
+func (*ReplicationStatusResponse) Descriptor() ([]byte, []int) {
+	return file_dhukuti_oms_v1_oms_proto_rawDescGZIP(), []int{12}
+}
+
+func (x *ReplicationStatusResponse) GetSymbols() []*SymbolLag {
+	if x != nil {
+		return x.Symbols
+	}
+	return nil
 }
 
 type PlaceOrderRequest struct {
@@ -142,7 +942,7 @@ type PlaceOrderRequest struct {
 
 func (x *PlaceOrderRequest) Reset() {
 	*x = PlaceOrderRequest{}
-	mi := &file_dhukuti_oms_v1_oms_proto_msgTypes[0]
+	mi := &file_dhukuti_oms_v1_oms_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -154,7 +954,7 @@ func (x *PlaceOrderRequest) String() string {
 func (*PlaceOrderRequest) ProtoMessage() {}
 
 func (x *PlaceOrderRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_dhukuti_oms_v1_oms_proto_msgTypes[0]
+	mi := &file_dhukuti_oms_v1_oms_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -167,7 +967,7 @@ func (x *PlaceOrderRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PlaceOrderRequest.ProtoReflect.Descriptor instead.
 func (*PlaceOrderRequest) Descriptor() ([]byte, []int) {
-	return file_dhukuti_oms_v1_oms_proto_rawDescGZIP(), []int{0}
+	return file_dhukuti_oms_v1_oms_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *PlaceOrderRequest) GetSymbol() string {
@@ -238,7 +1038,7 @@ type PlaceOrderResponse struct {
 
 func (x *PlaceOrderResponse) Reset() {
 	*x = PlaceOrderResponse{}
-	mi := &file_dhukuti_oms_v1_oms_proto_msgTypes[1]
+	mi := &file_dhukuti_oms_v1_oms_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -250,7 +1050,7 @@ func (x *PlaceOrderResponse) String() string {
 func (*PlaceOrderResponse) ProtoMessage() {}
 
 func (x *PlaceOrderResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_dhukuti_oms_v1_oms_proto_msgTypes[1]
+	mi := &file_dhukuti_oms_v1_oms_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -263,7 +1063,7 @@ func (x *PlaceOrderResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PlaceOrderResponse.ProtoReflect.Descriptor instead.
 func (*PlaceOrderResponse) Descriptor() ([]byte, []int) {
-	return file_dhukuti_oms_v1_oms_proto_rawDescGZIP(), []int{1}
+	return file_dhukuti_oms_v1_oms_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *PlaceOrderResponse) GetOrderId() int64 {
@@ -315,7 +1115,7 @@ type CancelOrderRequest struct {
 
 func (x *CancelOrderRequest) Reset() {
 	*x = CancelOrderRequest{}
-	mi := &file_dhukuti_oms_v1_oms_proto_msgTypes[2]
+	mi := &file_dhukuti_oms_v1_oms_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -327,7 +1127,7 @@ func (x *CancelOrderRequest) String() string {
 func (*CancelOrderRequest) ProtoMessage() {}
 
 func (x *CancelOrderRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_dhukuti_oms_v1_oms_proto_msgTypes[2]
+	mi := &file_dhukuti_oms_v1_oms_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -340,7 +1140,7 @@ func (x *CancelOrderRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CancelOrderRequest.ProtoReflect.Descriptor instead.
 func (*CancelOrderRequest) Descriptor() ([]byte, []int) {
-	return file_dhukuti_oms_v1_oms_proto_rawDescGZIP(), []int{2}
+	return file_dhukuti_oms_v1_oms_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *CancelOrderRequest) GetSymbol() string {
@@ -373,7 +1173,7 @@ type CancelOrderResponse struct {
 
 func (x *CancelOrderResponse) Reset() {
 	*x = CancelOrderResponse{}
-	mi := &file_dhukuti_oms_v1_oms_proto_msgTypes[3]
+	mi := &file_dhukuti_oms_v1_oms_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -385,7 +1185,7 @@ func (x *CancelOrderResponse) String() string {
 func (*CancelOrderResponse) ProtoMessage() {}
 
 func (x *CancelOrderResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_dhukuti_oms_v1_oms_proto_msgTypes[3]
+	mi := &file_dhukuti_oms_v1_oms_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -398,7 +1198,7 @@ func (x *CancelOrderResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CancelOrderResponse.ProtoReflect.Descriptor instead.
 func (*CancelOrderResponse) Descriptor() ([]byte, []int) {
-	return file_dhukuti_oms_v1_oms_proto_rawDescGZIP(), []int{3}
+	return file_dhukuti_oms_v1_oms_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *CancelOrderResponse) GetLogPosition() int64 {
@@ -417,7 +1217,7 @@ type StreamTradesRequest struct {
 
 func (x *StreamTradesRequest) Reset() {
 	*x = StreamTradesRequest{}
-	mi := &file_dhukuti_oms_v1_oms_proto_msgTypes[4]
+	mi := &file_dhukuti_oms_v1_oms_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -429,7 +1229,7 @@ func (x *StreamTradesRequest) String() string {
 func (*StreamTradesRequest) ProtoMessage() {}
 
 func (x *StreamTradesRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_dhukuti_oms_v1_oms_proto_msgTypes[4]
+	mi := &file_dhukuti_oms_v1_oms_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -442,7 +1242,7 @@ func (x *StreamTradesRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StreamTradesRequest.ProtoReflect.Descriptor instead.
 func (*StreamTradesRequest) Descriptor() ([]byte, []int) {
-	return file_dhukuti_oms_v1_oms_proto_rawDescGZIP(), []int{4}
+	return file_dhukuti_oms_v1_oms_proto_rawDescGZIP(), []int{17}
 }
 
 func (x *StreamTradesRequest) GetSymbol() string {
@@ -479,7 +1279,7 @@ type Trade struct {
 
 func (x *Trade) Reset() {
 	*x = Trade{}
-	mi := &file_dhukuti_oms_v1_oms_proto_msgTypes[5]
+	mi := &file_dhukuti_oms_v1_oms_proto_msgTypes[18]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -491,7 +1291,7 @@ func (x *Trade) String() string {
 func (*Trade) ProtoMessage() {}
 
 func (x *Trade) ProtoReflect() protoreflect.Message {
-	mi := &file_dhukuti_oms_v1_oms_proto_msgTypes[5]
+	mi := &file_dhukuti_oms_v1_oms_proto_msgTypes[18]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -504,7 +1304,7 @@ func (x *Trade) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Trade.ProtoReflect.Descriptor instead.
 func (*Trade) Descriptor() ([]byte, []int) {
-	return file_dhukuti_oms_v1_oms_proto_rawDescGZIP(), []int{5}
+	return file_dhukuti_oms_v1_oms_proto_rawDescGZIP(), []int{18}
 }
 
 func (x *Trade) GetTradeId() int64 {
@@ -581,7 +1381,54 @@ var File_dhukuti_oms_v1_oms_proto protoreflect.FileDescriptor
 
 const file_dhukuti_oms_v1_oms_proto_rawDesc = "" +
 	"\n" +
-	"\x18dhukuti/oms/v1/oms.proto\x12\x0edhukuti.oms.v1\"\xd5\x01\n" +
+	"\x18dhukuti/oms/v1/oms.proto\x12\x0edhukuti.oms.v1\"0\n" +
+	"\x16GetBookSnapshotRequest\x12\x16\n" +
+	"\x06symbol\x18\x01 \x01(\tR\x06symbol\"[\n" +
+	"\x17GetBookSnapshotResponse\x12\x1d\n" +
+	"\n" +
+	"depth_json\x18\x01 \x01(\tR\tdepthJson\x12!\n" +
+	"\flog_position\x18\x02 \x01(\x03R\vlogPosition\"\x14\n" +
+	"\x12ListSymbolsRequest\"/\n" +
+	"\x13ListSymbolsResponse\x12\x18\n" +
+	"\asymbols\x18\x01 \x03(\tR\asymbols\"Q\n" +
+	"\x10StreamWALRequest\x12\x16\n" +
+	"\x06symbol\x18\x01 \x01(\tR\x06symbol\x12%\n" +
+	"\x0eafter_position\x18\x02 \x01(\x03R\rafterPosition\"\x8e\x02\n" +
+	"\tWALRecord\x12\x1a\n" +
+	"\bposition\x18\x01 \x01(\x03R\bposition\x12-\n" +
+	"\x13logged_at_unix_nano\x18\x02 \x01(\x03R\x10loggedAtUnixNano\x121\n" +
+	"\x04kind\x18\x03 \x01(\x0e2\x1d.dhukuti.oms.v1.WALRecordKindR\x04kind\x12+\n" +
+	"\x05order\x18\x04 \x01(\v2\x15.dhukuti.oms.v1.OrderR\x05order\x12&\n" +
+	"\x0fcancel_order_id\x18\x05 \x01(\x03R\rcancelOrderId\x12.\n" +
+	"\x13cancel_requested_by\x18\x06 \x01(\tR\x11cancelRequestedBy\"\x93\x02\n" +
+	"\x05Order\x12\x19\n" +
+	"\border_id\x18\x01 \x01(\x03R\aorderId\x12\x16\n" +
+	"\x06symbol\x18\x02 \x01(\tR\x06symbol\x12\x1d\n" +
+	"\n" +
+	"account_id\x18\x03 \x01(\tR\taccountId\x12-\n" +
+	"\x04type\x18\x04 \x01(\x0e2\x19.dhukuti.oms.v1.OrderTypeR\x04type\x12\x14\n" +
+	"\x05price\x18\x05 \x01(\x03R\x05price\x12\x1a\n" +
+	"\bquantity\x18\x06 \x01(\x03R\bquantity\x12(\n" +
+	"\x04side\x18\a \x01(\x0e2\x14.dhukuti.oms.v1.SideR\x04side\x12-\n" +
+	"\x13placed_at_unix_nano\x18\b \x01(\x03R\x10placedAtUnixNano\"s\n" +
+	"\bWALBatch\x123\n" +
+	"\arecords\x18\x01 \x03(\v2\x19.dhukuti.oms.v1.WALRecordR\arecords\x122\n" +
+	"\x15primary_last_position\x18\x02 \x01(\x03R\x13primaryLastPosition\"\xa5\x01\n" +
+	"\x15ReportProgressRequest\x12\x16\n" +
+	"\x06symbol\x18\x01 \x01(\tR\x06symbol\x12)\n" +
+	"\x10applied_position\x18\x02 \x01(\x03R\x0fappliedPosition\x12I\n" +
+	"\"applied_record_logged_at_unix_nano\x18\x03 \x01(\x03R\x1dappliedRecordLoggedAtUnixNano\"\x18\n" +
+	"\x16ReportProgressResponse\"\x1a\n" +
+	"\x18ReplicationStatusRequest\"\xec\x01\n" +
+	"\tSymbolLag\x12\x16\n" +
+	"\x06symbol\x18\x01 \x01(\tR\x06symbol\x12)\n" +
+	"\x10primary_position\x18\x02 \x01(\x03R\x0fprimaryPosition\x12+\n" +
+	"\x11follower_position\x18\x03 \x01(\x03R\x10followerPosition\x12%\n" +
+	"\x0erecords_behind\x18\x04 \x01(\x03R\rrecordsBehind\x12#\n" +
+	"\rmillis_behind\x18\x05 \x01(\x03R\fmillisBehind\x12#\n" +
+	"\rfollower_seen\x18\x06 \x01(\bR\ffollowerSeen\"P\n" +
+	"\x19ReplicationStatusResponse\x123\n" +
+	"\asymbols\x18\x01 \x03(\v2\x19.dhukuti.oms.v1.SymbolLagR\asymbols\"\xd5\x01\n" +
 	"\x11PlaceOrderRequest\x12\x16\n" +
 	"\x06symbol\x18\x01 \x01(\tR\x06symbol\x12\x1d\n" +
 	"\n" +
@@ -617,7 +1464,11 @@ const file_dhukuti_oms_v1_oms_proto_rawDesc = "" +
 	"\x15executed_at_unix_nano\x18\t \x01(\x03R\x12executedAtUnixNano\x123\n" +
 	"\n" +
 	"taker_side\x18\n" +
-	" \x01(\x0e2\x14.dhukuti.oms.v1.SideR\ttakerSide*9\n" +
+	" \x01(\x0e2\x14.dhukuti.oms.v1.SideR\ttakerSide*h\n" +
+	"\rWALRecordKind\x12\x1f\n" +
+	"\x1bWAL_RECORD_KIND_UNSPECIFIED\x10\x00\x12\x1a\n" +
+	"\x16WAL_RECORD_KIND_SUBMIT\x10\x01\x12\x1a\n" +
+	"\x16WAL_RECORD_KIND_CANCEL\x10\x02*9\n" +
 	"\x04Side\x12\x14\n" +
 	"\x10SIDE_UNSPECIFIED\x10\x00\x12\f\n" +
 	"\bSIDE_BUY\x10\x01\x12\r\n" +
@@ -625,12 +1476,18 @@ const file_dhukuti_oms_v1_oms_proto_rawDesc = "" +
 	"\tOrderType\x12\x1a\n" +
 	"\x16ORDER_TYPE_UNSPECIFIED\x10\x00\x12\x14\n" +
 	"\x10ORDER_TYPE_LIMIT\x10\x01\x12\x15\n" +
-	"\x11ORDER_TYPE_MARKET\x10\x022\x89\x02\n" +
+	"\x11ORDER_TYPE_MARKET\x10\x022\xed\x02\n" +
 	"\fOrderService\x12S\n" +
 	"\n" +
 	"PlaceOrder\x12!.dhukuti.oms.v1.PlaceOrderRequest\x1a\".dhukuti.oms.v1.PlaceOrderResponse\x12V\n" +
 	"\vCancelOrder\x12\".dhukuti.oms.v1.CancelOrderRequest\x1a#.dhukuti.oms.v1.CancelOrderResponse\x12L\n" +
-	"\fStreamTrades\x12#.dhukuti.oms.v1.StreamTradesRequest\x1a\x15.dhukuti.oms.v1.Trade0\x01B'Z%github.com/Poudel0/OMS/internal/pb;pbb\x06proto3"
+	"\fStreamTrades\x12#.dhukuti.oms.v1.StreamTradesRequest\x1a\x15.dhukuti.oms.v1.Trade0\x01\x12b\n" +
+	"\x0fGetBookSnapshot\x12&.dhukuti.oms.v1.GetBookSnapshotRequest\x1a'.dhukuti.oms.v1.GetBookSnapshotResponse2\x82\x03\n" +
+	"\x12ReplicationService\x12V\n" +
+	"\vListSymbols\x12\".dhukuti.oms.v1.ListSymbolsRequest\x1a#.dhukuti.oms.v1.ListSymbolsResponse\x12I\n" +
+	"\tStreamWAL\x12 .dhukuti.oms.v1.StreamWALRequest\x1a\x18.dhukuti.oms.v1.WALBatch0\x01\x12_\n" +
+	"\x0eReportProgress\x12%.dhukuti.oms.v1.ReportProgressRequest\x1a&.dhukuti.oms.v1.ReportProgressResponse\x12h\n" +
+	"\x11ReplicationStatus\x12(.dhukuti.oms.v1.ReplicationStatusRequest\x1a).dhukuti.oms.v1.ReplicationStatusResponseB'Z%github.com/Poudel0/OMS/internal/pb;pbb\x06proto3"
 
 var (
 	file_dhukuti_oms_v1_oms_proto_rawDescOnce sync.Once
@@ -644,34 +1501,64 @@ func file_dhukuti_oms_v1_oms_proto_rawDescGZIP() []byte {
 	return file_dhukuti_oms_v1_oms_proto_rawDescData
 }
 
-var file_dhukuti_oms_v1_oms_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
-var file_dhukuti_oms_v1_oms_proto_msgTypes = make([]protoimpl.MessageInfo, 6)
+var file_dhukuti_oms_v1_oms_proto_enumTypes = make([]protoimpl.EnumInfo, 3)
+var file_dhukuti_oms_v1_oms_proto_msgTypes = make([]protoimpl.MessageInfo, 19)
 var file_dhukuti_oms_v1_oms_proto_goTypes = []any{
-	(Side)(0),                   // 0: dhukuti.oms.v1.Side
-	(OrderType)(0),              // 1: dhukuti.oms.v1.OrderType
-	(*PlaceOrderRequest)(nil),   // 2: dhukuti.oms.v1.PlaceOrderRequest
-	(*PlaceOrderResponse)(nil),  // 3: dhukuti.oms.v1.PlaceOrderResponse
-	(*CancelOrderRequest)(nil),  // 4: dhukuti.oms.v1.CancelOrderRequest
-	(*CancelOrderResponse)(nil), // 5: dhukuti.oms.v1.CancelOrderResponse
-	(*StreamTradesRequest)(nil), // 6: dhukuti.oms.v1.StreamTradesRequest
-	(*Trade)(nil),               // 7: dhukuti.oms.v1.Trade
+	(WALRecordKind)(0),                // 0: dhukuti.oms.v1.WALRecordKind
+	(Side)(0),                         // 1: dhukuti.oms.v1.Side
+	(OrderType)(0),                    // 2: dhukuti.oms.v1.OrderType
+	(*GetBookSnapshotRequest)(nil),    // 3: dhukuti.oms.v1.GetBookSnapshotRequest
+	(*GetBookSnapshotResponse)(nil),   // 4: dhukuti.oms.v1.GetBookSnapshotResponse
+	(*ListSymbolsRequest)(nil),        // 5: dhukuti.oms.v1.ListSymbolsRequest
+	(*ListSymbolsResponse)(nil),       // 6: dhukuti.oms.v1.ListSymbolsResponse
+	(*StreamWALRequest)(nil),          // 7: dhukuti.oms.v1.StreamWALRequest
+	(*WALRecord)(nil),                 // 8: dhukuti.oms.v1.WALRecord
+	(*Order)(nil),                     // 9: dhukuti.oms.v1.Order
+	(*WALBatch)(nil),                  // 10: dhukuti.oms.v1.WALBatch
+	(*ReportProgressRequest)(nil),     // 11: dhukuti.oms.v1.ReportProgressRequest
+	(*ReportProgressResponse)(nil),    // 12: dhukuti.oms.v1.ReportProgressResponse
+	(*ReplicationStatusRequest)(nil),  // 13: dhukuti.oms.v1.ReplicationStatusRequest
+	(*SymbolLag)(nil),                 // 14: dhukuti.oms.v1.SymbolLag
+	(*ReplicationStatusResponse)(nil), // 15: dhukuti.oms.v1.ReplicationStatusResponse
+	(*PlaceOrderRequest)(nil),         // 16: dhukuti.oms.v1.PlaceOrderRequest
+	(*PlaceOrderResponse)(nil),        // 17: dhukuti.oms.v1.PlaceOrderResponse
+	(*CancelOrderRequest)(nil),        // 18: dhukuti.oms.v1.CancelOrderRequest
+	(*CancelOrderResponse)(nil),       // 19: dhukuti.oms.v1.CancelOrderResponse
+	(*StreamTradesRequest)(nil),       // 20: dhukuti.oms.v1.StreamTradesRequest
+	(*Trade)(nil),                     // 21: dhukuti.oms.v1.Trade
 }
 var file_dhukuti_oms_v1_oms_proto_depIdxs = []int32{
-	0, // 0: dhukuti.oms.v1.PlaceOrderRequest.side:type_name -> dhukuti.oms.v1.Side
-	1, // 1: dhukuti.oms.v1.PlaceOrderRequest.type:type_name -> dhukuti.oms.v1.OrderType
-	7, // 2: dhukuti.oms.v1.PlaceOrderResponse.trades:type_name -> dhukuti.oms.v1.Trade
-	0, // 3: dhukuti.oms.v1.Trade.taker_side:type_name -> dhukuti.oms.v1.Side
-	2, // 4: dhukuti.oms.v1.OrderService.PlaceOrder:input_type -> dhukuti.oms.v1.PlaceOrderRequest
-	4, // 5: dhukuti.oms.v1.OrderService.CancelOrder:input_type -> dhukuti.oms.v1.CancelOrderRequest
-	6, // 6: dhukuti.oms.v1.OrderService.StreamTrades:input_type -> dhukuti.oms.v1.StreamTradesRequest
-	3, // 7: dhukuti.oms.v1.OrderService.PlaceOrder:output_type -> dhukuti.oms.v1.PlaceOrderResponse
-	5, // 8: dhukuti.oms.v1.OrderService.CancelOrder:output_type -> dhukuti.oms.v1.CancelOrderResponse
-	7, // 9: dhukuti.oms.v1.OrderService.StreamTrades:output_type -> dhukuti.oms.v1.Trade
-	7, // [7:10] is the sub-list for method output_type
-	4, // [4:7] is the sub-list for method input_type
-	4, // [4:4] is the sub-list for extension type_name
-	4, // [4:4] is the sub-list for extension extendee
-	0, // [0:4] is the sub-list for field type_name
+	0,  // 0: dhukuti.oms.v1.WALRecord.kind:type_name -> dhukuti.oms.v1.WALRecordKind
+	9,  // 1: dhukuti.oms.v1.WALRecord.order:type_name -> dhukuti.oms.v1.Order
+	2,  // 2: dhukuti.oms.v1.Order.type:type_name -> dhukuti.oms.v1.OrderType
+	1,  // 3: dhukuti.oms.v1.Order.side:type_name -> dhukuti.oms.v1.Side
+	8,  // 4: dhukuti.oms.v1.WALBatch.records:type_name -> dhukuti.oms.v1.WALRecord
+	14, // 5: dhukuti.oms.v1.ReplicationStatusResponse.symbols:type_name -> dhukuti.oms.v1.SymbolLag
+	1,  // 6: dhukuti.oms.v1.PlaceOrderRequest.side:type_name -> dhukuti.oms.v1.Side
+	2,  // 7: dhukuti.oms.v1.PlaceOrderRequest.type:type_name -> dhukuti.oms.v1.OrderType
+	21, // 8: dhukuti.oms.v1.PlaceOrderResponse.trades:type_name -> dhukuti.oms.v1.Trade
+	1,  // 9: dhukuti.oms.v1.Trade.taker_side:type_name -> dhukuti.oms.v1.Side
+	16, // 10: dhukuti.oms.v1.OrderService.PlaceOrder:input_type -> dhukuti.oms.v1.PlaceOrderRequest
+	18, // 11: dhukuti.oms.v1.OrderService.CancelOrder:input_type -> dhukuti.oms.v1.CancelOrderRequest
+	20, // 12: dhukuti.oms.v1.OrderService.StreamTrades:input_type -> dhukuti.oms.v1.StreamTradesRequest
+	3,  // 13: dhukuti.oms.v1.OrderService.GetBookSnapshot:input_type -> dhukuti.oms.v1.GetBookSnapshotRequest
+	5,  // 14: dhukuti.oms.v1.ReplicationService.ListSymbols:input_type -> dhukuti.oms.v1.ListSymbolsRequest
+	7,  // 15: dhukuti.oms.v1.ReplicationService.StreamWAL:input_type -> dhukuti.oms.v1.StreamWALRequest
+	11, // 16: dhukuti.oms.v1.ReplicationService.ReportProgress:input_type -> dhukuti.oms.v1.ReportProgressRequest
+	13, // 17: dhukuti.oms.v1.ReplicationService.ReplicationStatus:input_type -> dhukuti.oms.v1.ReplicationStatusRequest
+	17, // 18: dhukuti.oms.v1.OrderService.PlaceOrder:output_type -> dhukuti.oms.v1.PlaceOrderResponse
+	19, // 19: dhukuti.oms.v1.OrderService.CancelOrder:output_type -> dhukuti.oms.v1.CancelOrderResponse
+	21, // 20: dhukuti.oms.v1.OrderService.StreamTrades:output_type -> dhukuti.oms.v1.Trade
+	4,  // 21: dhukuti.oms.v1.OrderService.GetBookSnapshot:output_type -> dhukuti.oms.v1.GetBookSnapshotResponse
+	6,  // 22: dhukuti.oms.v1.ReplicationService.ListSymbols:output_type -> dhukuti.oms.v1.ListSymbolsResponse
+	10, // 23: dhukuti.oms.v1.ReplicationService.StreamWAL:output_type -> dhukuti.oms.v1.WALBatch
+	12, // 24: dhukuti.oms.v1.ReplicationService.ReportProgress:output_type -> dhukuti.oms.v1.ReportProgressResponse
+	15, // 25: dhukuti.oms.v1.ReplicationService.ReplicationStatus:output_type -> dhukuti.oms.v1.ReplicationStatusResponse
+	18, // [18:26] is the sub-list for method output_type
+	10, // [10:18] is the sub-list for method input_type
+	10, // [10:10] is the sub-list for extension type_name
+	10, // [10:10] is the sub-list for extension extendee
+	0,  // [0:10] is the sub-list for field type_name
 }
 
 func init() { file_dhukuti_oms_v1_oms_proto_init() }
@@ -684,10 +1571,10 @@ func file_dhukuti_oms_v1_oms_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_dhukuti_oms_v1_oms_proto_rawDesc), len(file_dhukuti_oms_v1_oms_proto_rawDesc)),
-			NumEnums:      2,
-			NumMessages:   6,
+			NumEnums:      3,
+			NumMessages:   19,
 			NumExtensions: 0,
-			NumServices:   1,
+			NumServices:   2,
 		},
 		GoTypes:           file_dhukuti_oms_v1_oms_proto_goTypes,
 		DependencyIndexes: file_dhukuti_oms_v1_oms_proto_depIdxs,

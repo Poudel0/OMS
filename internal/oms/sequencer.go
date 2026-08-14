@@ -45,17 +45,28 @@ type OrderResponse struct {
 	TotalLatency time.Duration
 }
 
-// request is one unit of work for the sequencer goroutine. Submits and
-// cancels share a single struct and a single channel on purpose: the WAL has
-// to record mutations in exactly the order the book applies them, and one
-// channel gets that from the channel's own FIFO guarantee. Two channels
-// selected over would let a cancel sent later overtake a submit sent
-// earlier, because a Go select among ready cases picks at random.
+// reqKind is what a request asks the sequencer to do. It is deliberately not
+// RecordKind: a snapshot is a request but never a log record, and conflating the
+// two would put a value in the log format's enum that the log can never hold.
+type reqKind uint8
+
+const (
+	reqSubmit reqKind = iota + 1
+	reqCancel
+	reqSnapshot
+)
+
+// request is one unit of work for the sequencer goroutine. Submits and cancels
+// share a single struct and a single channel on purpose: the WAL has to record
+// mutations in exactly the order the book applies them, and one channel gets
+// that from the channel's own FIFO guarantee. Two channels selected over would
+// let a cancel sent later overtake a submit sent earlier, because a Go select
+// among ready cases picks at random.
 type request struct {
-	kind     RecordKind
-	order    Order  // kind == RecordSubmit
-	cancelID SeqID  // kind == RecordCancel
-	cancelBy string // kind == RecordCancel; "" means skip the ownership check
+	kind     reqKind
+	order    Order  // kind == reqSubmit
+	cancelID SeqID  // kind == reqCancel
+	cancelBy string // kind == reqCancel; "" means skip the ownership check
 	seq      int64  // assigned by the sequencer at commit time
 	orderID  SeqID  // assigned by the sequencer at commit time, if it assigns
 	// preErr is set when the order was rejected before it reached the log —
@@ -66,6 +77,7 @@ type request struct {
 }
 
 type result struct {
+	state         BookState
 	seq           int64
 	orderID       SeqID
 	trades        []Trade
@@ -221,7 +233,7 @@ func (s *Sequencer) commit(batch []request) {
 	// resurrect the order under a different identity and no cancel would ever
 	// find it again.
 	for i := range batch {
-		if batch[i].kind != RecordSubmit {
+		if batch[i].kind != reqSubmit {
 			continue
 		}
 		if batch[i].order.SeqID == 0 {
@@ -244,7 +256,7 @@ func (s *Sequencer) commit(batch []request) {
 	// diverge from the one that was lost.
 	if s.accounts != nil {
 		for i := range batch {
-			if batch[i].kind != RecordSubmit {
+			if batch[i].kind != reqSubmit {
 				continue
 			}
 			if err := s.accounts.Reserve(batch[i].order); err != nil {
@@ -269,6 +281,12 @@ func (s *Sequencer) commit(batch []request) {
 		req := batch[i]
 		res := result{seq: req.seq, orderID: req.orderID, pickedUpAt: pickedUpAt}
 		switch {
+		case req.kind == reqSnapshot:
+			// A read, so it is never logged and cannot fail. Serving it from
+			// this goroutine is what makes it race-free: the book has exactly
+			// one reader-writer, and s.seq is owned by this goroutine too.
+			res.state = s.book.Snapshot()
+			res.seq = s.seq
 		case req.preErr != nil:
 			// Rejected before the log. Reserve failed, so there is no hold to
 			// release.
@@ -278,7 +296,7 @@ func (s *Sequencer) commit(batch []request) {
 			// Reserved, then the log refused it. The order is not accepted, so
 			// the hold must go back.
 			s.release(req)
-		case req.kind == RecordCancel:
+		case req.kind == reqCancel:
 			res.err = s.book.CancelOwned(req.cancelID, req.cancelBy)
 			if res.err == nil && s.accounts != nil {
 				s.accounts.Release(s.symbol, req.cancelID)
@@ -308,7 +326,7 @@ func (s *Sequencer) commit(batch []request) {
 
 // release drops a submit's reservation. Cancels never hold one of their own.
 func (s *Sequencer) release(req request) {
-	if s.accounts != nil && req.kind == RecordSubmit {
+	if s.accounts != nil && req.kind == reqSubmit {
 		s.accounts.Release(s.symbol, req.orderID)
 	}
 }
@@ -327,10 +345,14 @@ func (s *Sequencer) logBatch(batch []request, ts time.Time) error {
 		if batch[i].preErr != nil {
 			continue // never accepted, so it consumes no log position
 		}
+		if batch[i].kind == reqSnapshot {
+			continue // a read changes nothing, so there is nothing to log
+		}
 		s.seq++
 		batch[i].seq = s.seq
-		rec := Record{Seq: s.seq, Kind: batch[i].kind, TS: ts}
-		if batch[i].kind == RecordCancel {
+		rec := Record{Seq: s.seq, Kind: RecordSubmit, TS: ts}
+		if batch[i].kind == reqCancel {
+			rec.Kind = RecordCancel
 			rec.CancelID = batch[i].cancelID
 			rec.CancelBy = batch[i].cancelBy
 		} else {
@@ -389,7 +411,7 @@ func (s *Sequencer) do(ctx context.Context, req request) (result, error) {
 // book's own tests rely on.
 func (s *Sequencer) Submit(ctx context.Context, o Order) (OrderResponse, error) {
 	sentAt := time.Now()
-	res, err := s.do(ctx, request{kind: RecordSubmit, order: o})
+	res, err := s.do(ctx, request{kind: reqSubmit, order: o})
 	if err != nil {
 		return OrderResponse{}, err
 	}
@@ -407,7 +429,7 @@ func (s *Sequencer) Submit(ctx context.Context, o Order) (OrderResponse, error) 
 // Cancel removes a resting order by ID, with no ownership check. Use
 // CancelFor for anything that came off the network.
 func (s *Sequencer) Cancel(ctx context.Context, orderID SeqID) error {
-	_, err := s.do(ctx, request{kind: RecordCancel, cancelID: orderID})
+	_, err := s.do(ctx, request{kind: reqCancel, cancelID: orderID})
 	return err
 }
 
@@ -420,8 +442,21 @@ func (s *Sequencer) Cancel(ctx context.Context, orderID SeqID) error {
 // there is no window in which the order could be filled and its ID reused
 // between the two.
 func (s *Sequencer) CancelFor(ctx context.Context, orderID SeqID, account string) (int64, error) {
-	res, err := s.do(ctx, request{kind: RecordCancel, cancelID: orderID, cancelBy: account})
+	res, err := s.do(ctx, request{kind: reqCancel, cancelID: orderID, cancelBy: account})
 	return res.seq, err
+}
+
+// Snapshot returns the symbol's current book depth, served from inside the
+// sequencer goroutine so that it cannot race a mutation. It is a read: nothing
+// is logged and no position is consumed.
+// It also reports the log position the snapshot was taken at, which is what
+// makes two nodes' snapshots comparable after a failover.
+func (s *Sequencer) Snapshot(ctx context.Context) (BookState, int64, error) {
+	res, err := s.do(ctx, request{kind: reqSnapshot})
+	if err != nil {
+		return "", 0, err
+	}
+	return res.state, res.seq, nil
 }
 
 // Close stops the sequencer, waits for its goroutine to exit, and closes the

@@ -108,7 +108,7 @@ type walPayload struct {
 	CancelBy string `json:"cb,omitempty"`
 }
 
-// apply replays this record against book, discarding the mutation's error.
+// Apply replays this record against book, discarding the mutation's error.
 //
 // Discarding it is correct, not lazy: the log is written *before* the book is
 // touched, so it records attempts rather than successes. A Cancel for an ID
@@ -116,7 +116,7 @@ type walPayload struct {
 // unchanged; replaying it fails identically and leaves the book unchanged
 // again. Treating that as a replay failure would reject logs that are in
 // fact perfectly faithful.
-func (rec Record) apply(book *Book) {
+func (rec Record) Apply(book *Book) {
 	switch rec.Kind {
 	case RecordSubmit:
 		_, _ = book.Submit(rec.Order)
@@ -345,10 +345,39 @@ type Reader struct {
 
 // OpenReader opens a segment and validates its header.
 func OpenReader(path string) (*Reader, error) {
+	return OpenReaderAt(path, walHeaderSize)
+}
+
+// OpenReaderAt opens a segment, validates its header, and positions the reader
+// at a byte offset that a previous scan reported via Offset.
+//
+// It exists for tailing a log that is still being written: a scan that stops at
+// a partial record must be able to resume from exactly the last verified record
+// once more bytes have landed.
+func OpenReaderAt(path string, offset int64) (*Reader, error) {
+	if offset < walHeaderSize {
+		return nil, fmt.Errorf("oms: wal offset %d is inside the segment header", offset)
+	}
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, fmt.Errorf("oms: open wal segment: %w", err)
 	}
+	r, err := newReader(f, path)
+	if err != nil {
+		return nil, err
+	}
+	if offset > walHeaderSize {
+		if _, err := f.Seek(offset, io.SeekStart); err != nil {
+			f.Close()
+			return nil, fmt.Errorf("oms: seek wal segment %s to %d: %w", path, offset, err)
+		}
+		r.br.Reset(f)
+		r.offset = offset
+	}
+	return r, nil
+}
+
+func newReader(f *os.File, path string) (*Reader, error) {
 	br := bufio.NewReader(f)
 	var hdr [walHeaderSize]byte
 	if _, err := io.ReadFull(br, hdr[:]); err != nil {
@@ -484,12 +513,39 @@ func Recover(dir string, book *Book, afterSeq int64) (lastSeq int64, err error) 
 				lastSeq = rec.Seq
 			}
 			if rec.Seq > afterSeq {
-				rec.apply(book)
+				rec.Apply(book)
 			}
 		}
 		if err := r.Close(); err != nil {
 			return lastSeq, err
 		}
+	}
+	return lastSeq, nil
+}
+
+// LastPosition reports the highest log position durably present in dir, or 0 if
+// the symbol has never been written to.
+//
+// It reads the newest segment rather than asking a Sequencer, so it reflects what
+// a follower could actually receive — which is the number replication lag has to
+// be measured against.
+func LastPosition(dir string) (int64, error) {
+	segs, err := segmentPaths(dir)
+	if err != nil {
+		return 0, err
+	}
+	if len(segs) == 0 {
+		return 0, nil
+	}
+	last := segs[len(segs)-1]
+	lastSeq, _, err := scanSegment(last)
+	if err != nil {
+		return 0, err
+	}
+	// A segment created but crashed on before its first record carries its
+	// starting position only in its name — same reasoning as OpenWriter.
+	if nameSeq, err := seqFromName(last); err == nil && nameSeq-1 > lastSeq {
+		lastSeq = nameSeq - 1
 	}
 	return lastSeq, nil
 }

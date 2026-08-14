@@ -1,0 +1,49 @@
+# Week 5 failover demo: real processes, hard kill, manual promotion.
+# Hardware: Ryzen 5 4600H. WAL on btrfs/LUKS/zstd:3 NVMe. Postgres via local socket.
+
+## Setup
+  omsd     -addr :19500 -wal <primary-wal>  -seed-accounts 4 -seed-symbols NABIL,ADBL
+  follower -primary :19500 -wal <follower-wal>
+  loadgen  -addr :19500 -workers 16 -duration 8s -accounts 4 -symbols NABIL,ADBL
+
+## Load
+  accepted 3714 orders, 2448 trades across 2 symbols
+
+## Replication caught up (ReplicationStatus on the primary)
+  ADBL : primaryPosition 1852, followerPosition 1852, recordsBehind 0
+  NABIL: primaryPosition 1873, followerPosition 1873, recordsBehind 0
+
+## Primary book before failover (GetBookSnapshot NABIL)
+  logPosition 1873
+  bids [496:1129, 495:2012]
+  asks [501:45, 504:593, 505:1679]
+
+## Failover
+  kill -9 <primary>          # no graceful shutdown, no WAL close
+  stop <follower>
+  omsd -addr :19501 -wal <follower-wal>   # PROMOTION: a normal server, same log
+
+## Promoted node book
+  logPosition 1873
+  bids [496:1129, 495:2012]
+  asks [501:45, 504:593, 505:1679]
+  -> depth JSON byte-identical to the lost primary's, at the same position.
+
+## Promoted node accepts new business, continuing the log
+  PlaceOrder NABIL buy 7@400 -> orderId 1874, logPosition 1874
+
+## Journal after the whole exercise
+  2451 trades, 0 imbalanced groups, net cash 0
+
+## Why promotion is this cheap
+  The follower stores records under the PRIMARY's positions, in the primary's own
+  format. So its log IS a primary's log: promotion is pointing `omsd -wal` at the
+  directory, with no conversion step to get wrong while the venue is down. It is
+  also why the follower needs no separate checkpoint file -- its log's last
+  position is its checkpoint.
+
+## The honest gap (see ADR-006)
+  Trades the old primary executed but had not yet settled are NOT recovered by
+  promotion. Replay rebuilds the book, not the journal, so those executions exist
+  in the log and never reach Postgres. Nothing above hit that window because the
+  load had drained before the kill; a kill mid-flight would.

@@ -99,6 +99,15 @@ func run() error {
 
 	gs := grpc.NewServer()
 	pb.RegisterOrderServiceServer(gs, srv)
+
+	// Replication is served from the same listener for now. A real deployment
+	// would put it on its own port with its own credentials: a follower is not a
+	// client, and the log is strictly more sensitive than the order API.
+	if *walDir != "" {
+		pb.RegisterReplicationServiceServer(gs, api.NewReplicationServer(*walDir, reg, log))
+	} else {
+		log.Warn("replication disabled: a node with no write-ahead log has nothing to ship")
+	}
 	// Reflection lets grpcurl explore the API without a copy of the .proto.
 	// Fine for a single-tenant venue you operate yourself; a public deployment
 	// would gate this behind an admin listener.

@@ -17,7 +17,7 @@ before the next one starts. Current state:
 - [x] Multi-symbol registry (one goroutine, book, and log per symbol)
 - [x] gRPC API (PlaceOrder / CancelOrder / StreamTrades)
 - [x] Postgres double-entry settlement, idempotent on trade identity
-- [ ] WAL shipping to a passive follower
+- [x] WAL shipping to a passive follower, manual failover
 - [ ] Tracing (OpenTelemetry) + metrics (Prometheus)
 
 See [`docs/adr/`](docs/adr/) for the design decisions behind each piece as
@@ -158,6 +158,9 @@ the sequencer that owns the symbol, and settles.
 - `StreamTrades` — live feed from the moment of subscription, published from
   inside the sequencer goroutine so trades cannot arrive out of match order. A
   subscriber that falls behind loses trades rather than stalling the matcher.
+- `GetBookSnapshot` — aggregated depth plus the log position it was taken at,
+  served from inside the sequencer goroutine so it is a consistent point-in-time
+  view. Mainly for comparing two nodes after a failover.
 
 Symbols are a trust boundary: a symbol becomes a directory name under the WAL
 root, so it is checked against an allowlist (`A-Z0-9`, ≤12 chars) and the number
@@ -195,6 +198,36 @@ Ledger tests skip without that variable, since CI needs to build without a
 database — CI supplies one via a service container so the skip does not become
 permanent.
 
+## Replication and failover
+
+One primary ships its write-ahead log to one passive follower, which replays it
+into its own books **and its own log**:
+
+```sh
+go run ./cmd/follower -primary 127.0.0.1:9090 -wal ./data/follower-wal
+grpcurl -plaintext localhost:9090 dhukuti.oms.v1.ReplicationService/ReplicationStatus
+```
+
+The follower reads the primary's log *files* rather than being fed from the
+sequencer, and that is the load-bearing choice: **a follower cannot exert
+backpressure on matching**, because nothing on the matching path waits for it. It
+can be slow, stalled, or absent and the primary's throughput is unchanged.
+
+It stores records under the **primary's** log positions, never renumbered. So its
+log *is* a primary's log, which buys two things: restart needs no checkpoint file
+(its last position is the checkpoint), and promotion is just pointing a normal
+server at the directory — no conversion step to get wrong while the venue is down.
+
+Demonstrated end to end in [`docs/bench/week5-failover-demo.txt`](docs/bench/week5-failover-demo.txt):
+after 3,714 orders, `kill -9` on the primary and promotion of the follower gives a
+book byte-identical to the lost primary's at the same log position, accepting new
+orders immediately.
+
+Async replication means a primary lost while the follower is N records behind
+loses those N acknowledged orders — `ReplicationStatus` is how you see how wide
+that window currently is. The procedure, and the reconciliation step promotion
+does *not* do for you, are in [`docs/failover.md`](docs/failover.md).
+
 ## Load testing
 
 ```sh
@@ -215,6 +248,7 @@ alongside the code that implements it:
 - [ADR-003: WAL with group-commit fsync and deterministic replay](docs/adr/0003-wal-design.md)
 - [ADR-004: Synchronous in-process settlement, idempotent on trade identity](docs/adr/0004-synchronous-settlement.md)
 - [ADR-005: Multi-symbol partitioning via a per-symbol sequencer registry](docs/adr/0005-multi-symbol-partitioning.md)
+- [ADR-006: Async WAL shipping to a passive follower, manual failover](docs/adr/0006-wal-shipping-replication.md)
 
 More land as the corresponding subsystem is built (WAL, settlement,
 multi-symbol partitioning, replication).

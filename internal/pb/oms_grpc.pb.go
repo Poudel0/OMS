@@ -19,9 +19,10 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	OrderService_PlaceOrder_FullMethodName   = "/dhukuti.oms.v1.OrderService/PlaceOrder"
-	OrderService_CancelOrder_FullMethodName  = "/dhukuti.oms.v1.OrderService/CancelOrder"
-	OrderService_StreamTrades_FullMethodName = "/dhukuti.oms.v1.OrderService/StreamTrades"
+	OrderService_PlaceOrder_FullMethodName      = "/dhukuti.oms.v1.OrderService/PlaceOrder"
+	OrderService_CancelOrder_FullMethodName     = "/dhukuti.oms.v1.OrderService/CancelOrder"
+	OrderService_StreamTrades_FullMethodName    = "/dhukuti.oms.v1.OrderService/StreamTrades"
+	OrderService_GetBookSnapshot_FullMethodName = "/dhukuti.oms.v1.OrderService/GetBookSnapshot"
 )
 
 // OrderServiceClient is the client API for OrderService service.
@@ -45,6 +46,14 @@ type OrderServiceClient interface {
 	// starts from the moment of subscription — it is a live feed, not a
 	// replayable history, so it makes no durability guarantee of its own.
 	StreamTrades(ctx context.Context, in *StreamTradesRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[Trade], error)
+	// GetBookSnapshot returns aggregated depth for one symbol. It is served from
+	// inside that symbol's sequencer goroutine, so it is a consistent
+	// point-in-time view rather than a torn read of a book being mutated.
+	//
+	// It exists mainly to compare two nodes: after a failover, "does the promoted
+	// node hold the same book the lost one did" needs an answer that does not
+	// involve reading files by hand.
+	GetBookSnapshot(ctx context.Context, in *GetBookSnapshotRequest, opts ...grpc.CallOption) (*GetBookSnapshotResponse, error)
 }
 
 type orderServiceClient struct {
@@ -94,6 +103,16 @@ func (c *orderServiceClient) StreamTrades(ctx context.Context, in *StreamTradesR
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type OrderService_StreamTradesClient = grpc.ServerStreamingClient[Trade]
 
+func (c *orderServiceClient) GetBookSnapshot(ctx context.Context, in *GetBookSnapshotRequest, opts ...grpc.CallOption) (*GetBookSnapshotResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetBookSnapshotResponse)
+	err := c.cc.Invoke(ctx, OrderService_GetBookSnapshot_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // OrderServiceServer is the server API for OrderService service.
 // All implementations must embed UnimplementedOrderServiceServer
 // for forward compatibility.
@@ -115,6 +134,14 @@ type OrderServiceServer interface {
 	// starts from the moment of subscription — it is a live feed, not a
 	// replayable history, so it makes no durability guarantee of its own.
 	StreamTrades(*StreamTradesRequest, grpc.ServerStreamingServer[Trade]) error
+	// GetBookSnapshot returns aggregated depth for one symbol. It is served from
+	// inside that symbol's sequencer goroutine, so it is a consistent
+	// point-in-time view rather than a torn read of a book being mutated.
+	//
+	// It exists mainly to compare two nodes: after a failover, "does the promoted
+	// node hold the same book the lost one did" needs an answer that does not
+	// involve reading files by hand.
+	GetBookSnapshot(context.Context, *GetBookSnapshotRequest) (*GetBookSnapshotResponse, error)
 	mustEmbedUnimplementedOrderServiceServer()
 }
 
@@ -133,6 +160,9 @@ func (UnimplementedOrderServiceServer) CancelOrder(context.Context, *CancelOrder
 }
 func (UnimplementedOrderServiceServer) StreamTrades(*StreamTradesRequest, grpc.ServerStreamingServer[Trade]) error {
 	return status.Errorf(codes.Unimplemented, "method StreamTrades not implemented")
+}
+func (UnimplementedOrderServiceServer) GetBookSnapshot(context.Context, *GetBookSnapshotRequest) (*GetBookSnapshotResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method GetBookSnapshot not implemented")
 }
 func (UnimplementedOrderServiceServer) mustEmbedUnimplementedOrderServiceServer() {}
 func (UnimplementedOrderServiceServer) testEmbeddedByValue()                      {}
@@ -202,6 +232,24 @@ func _OrderService_StreamTrades_Handler(srv interface{}, stream grpc.ServerStrea
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type OrderService_StreamTradesServer = grpc.ServerStreamingServer[Trade]
 
+func _OrderService_GetBookSnapshot_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetBookSnapshotRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(OrderServiceServer).GetBookSnapshot(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: OrderService_GetBookSnapshot_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(OrderServiceServer).GetBookSnapshot(ctx, req.(*GetBookSnapshotRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // OrderService_ServiceDesc is the grpc.ServiceDesc for OrderService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -217,11 +265,277 @@ var OrderService_ServiceDesc = grpc.ServiceDesc{
 			MethodName: "CancelOrder",
 			Handler:    _OrderService_CancelOrder_Handler,
 		},
+		{
+			MethodName: "GetBookSnapshot",
+			Handler:    _OrderService_GetBookSnapshot_Handler,
+		},
 	},
 	Streams: []grpc.StreamDesc{
 		{
 			StreamName:    "StreamTrades",
 			Handler:       _OrderService_StreamTrades_Handler,
+			ServerStreams: true,
+		},
+	},
+	Metadata: "dhukuti/oms/v1/oms.proto",
+}
+
+const (
+	ReplicationService_ListSymbols_FullMethodName       = "/dhukuti.oms.v1.ReplicationService/ListSymbols"
+	ReplicationService_StreamWAL_FullMethodName         = "/dhukuti.oms.v1.ReplicationService/StreamWAL"
+	ReplicationService_ReportProgress_FullMethodName    = "/dhukuti.oms.v1.ReplicationService/ReportProgress"
+	ReplicationService_ReplicationStatus_FullMethodName = "/dhukuti.oms.v1.ReplicationService/ReplicationStatus"
+)
+
+// ReplicationServiceClient is the client API for ReplicationService service.
+//
+// For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
+//
+// ReplicationService is the primary's side of WAL shipping: a follower streams
+// this node's write-ahead log and replays it into its own books, so it can be
+// promoted by hand if the primary is lost. See ADR-006.
+//
+// It is deliberately a separate service from OrderService. A follower is not a
+// client, the two have completely different trust and availability stories, and
+// keeping them apart means a deployment can expose one without the other.
+type ReplicationServiceClient interface {
+	// ListSymbols reports the symbols this node has logs for, so a follower can
+	// discover what to replicate without being configured with the list.
+	ListSymbols(ctx context.Context, in *ListSymbolsRequest, opts ...grpc.CallOption) (*ListSymbolsResponse, error)
+	// StreamWAL streams one symbol's log records from a position onward, and
+	// keeps streaming as new ones are appended. Records are batched as they
+	// become available.
+	//
+	// One stream per symbol, because the logs are per symbol (ADR-005). That
+	// needs no global ordering between symbols and means one lagging symbol
+	// cannot stall the others.
+	StreamWAL(ctx context.Context, in *StreamWALRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[WALBatch], error)
+	// ReportProgress lets a follower tell the primary how far it has applied, so
+	// the primary can report replication lag. It is advisory: the primary streams
+	// regardless, and a follower that never reports is simply invisible.
+	ReportProgress(ctx context.Context, in *ReportProgressRequest, opts ...grpc.CallOption) (*ReportProgressResponse, error)
+	// ReplicationStatus reports what the primary knows about each symbol's lag.
+	ReplicationStatus(ctx context.Context, in *ReplicationStatusRequest, opts ...grpc.CallOption) (*ReplicationStatusResponse, error)
+}
+
+type replicationServiceClient struct {
+	cc grpc.ClientConnInterface
+}
+
+func NewReplicationServiceClient(cc grpc.ClientConnInterface) ReplicationServiceClient {
+	return &replicationServiceClient{cc}
+}
+
+func (c *replicationServiceClient) ListSymbols(ctx context.Context, in *ListSymbolsRequest, opts ...grpc.CallOption) (*ListSymbolsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListSymbolsResponse)
+	err := c.cc.Invoke(ctx, ReplicationService_ListSymbols_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *replicationServiceClient) StreamWAL(ctx context.Context, in *StreamWALRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[WALBatch], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &ReplicationService_ServiceDesc.Streams[0], ReplicationService_StreamWAL_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[StreamWALRequest, WALBatch]{ClientStream: stream}
+	if err := x.ClientStream.SendMsg(in); err != nil {
+		return nil, err
+	}
+	if err := x.ClientStream.CloseSend(); err != nil {
+		return nil, err
+	}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type ReplicationService_StreamWALClient = grpc.ServerStreamingClient[WALBatch]
+
+func (c *replicationServiceClient) ReportProgress(ctx context.Context, in *ReportProgressRequest, opts ...grpc.CallOption) (*ReportProgressResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ReportProgressResponse)
+	err := c.cc.Invoke(ctx, ReplicationService_ReportProgress_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *replicationServiceClient) ReplicationStatus(ctx context.Context, in *ReplicationStatusRequest, opts ...grpc.CallOption) (*ReplicationStatusResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ReplicationStatusResponse)
+	err := c.cc.Invoke(ctx, ReplicationService_ReplicationStatus_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// ReplicationServiceServer is the server API for ReplicationService service.
+// All implementations must embed UnimplementedReplicationServiceServer
+// for forward compatibility.
+//
+// ReplicationService is the primary's side of WAL shipping: a follower streams
+// this node's write-ahead log and replays it into its own books, so it can be
+// promoted by hand if the primary is lost. See ADR-006.
+//
+// It is deliberately a separate service from OrderService. A follower is not a
+// client, the two have completely different trust and availability stories, and
+// keeping them apart means a deployment can expose one without the other.
+type ReplicationServiceServer interface {
+	// ListSymbols reports the symbols this node has logs for, so a follower can
+	// discover what to replicate without being configured with the list.
+	ListSymbols(context.Context, *ListSymbolsRequest) (*ListSymbolsResponse, error)
+	// StreamWAL streams one symbol's log records from a position onward, and
+	// keeps streaming as new ones are appended. Records are batched as they
+	// become available.
+	//
+	// One stream per symbol, because the logs are per symbol (ADR-005). That
+	// needs no global ordering between symbols and means one lagging symbol
+	// cannot stall the others.
+	StreamWAL(*StreamWALRequest, grpc.ServerStreamingServer[WALBatch]) error
+	// ReportProgress lets a follower tell the primary how far it has applied, so
+	// the primary can report replication lag. It is advisory: the primary streams
+	// regardless, and a follower that never reports is simply invisible.
+	ReportProgress(context.Context, *ReportProgressRequest) (*ReportProgressResponse, error)
+	// ReplicationStatus reports what the primary knows about each symbol's lag.
+	ReplicationStatus(context.Context, *ReplicationStatusRequest) (*ReplicationStatusResponse, error)
+	mustEmbedUnimplementedReplicationServiceServer()
+}
+
+// UnimplementedReplicationServiceServer must be embedded to have
+// forward compatible implementations.
+//
+// NOTE: this should be embedded by value instead of pointer to avoid a nil
+// pointer dereference when methods are called.
+type UnimplementedReplicationServiceServer struct{}
+
+func (UnimplementedReplicationServiceServer) ListSymbols(context.Context, *ListSymbolsRequest) (*ListSymbolsResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ListSymbols not implemented")
+}
+func (UnimplementedReplicationServiceServer) StreamWAL(*StreamWALRequest, grpc.ServerStreamingServer[WALBatch]) error {
+	return status.Errorf(codes.Unimplemented, "method StreamWAL not implemented")
+}
+func (UnimplementedReplicationServiceServer) ReportProgress(context.Context, *ReportProgressRequest) (*ReportProgressResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ReportProgress not implemented")
+}
+func (UnimplementedReplicationServiceServer) ReplicationStatus(context.Context, *ReplicationStatusRequest) (*ReplicationStatusResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ReplicationStatus not implemented")
+}
+func (UnimplementedReplicationServiceServer) mustEmbedUnimplementedReplicationServiceServer() {}
+func (UnimplementedReplicationServiceServer) testEmbeddedByValue()                            {}
+
+// UnsafeReplicationServiceServer may be embedded to opt out of forward compatibility for this service.
+// Use of this interface is not recommended, as added methods to ReplicationServiceServer will
+// result in compilation errors.
+type UnsafeReplicationServiceServer interface {
+	mustEmbedUnimplementedReplicationServiceServer()
+}
+
+func RegisterReplicationServiceServer(s grpc.ServiceRegistrar, srv ReplicationServiceServer) {
+	// If the following call pancis, it indicates UnimplementedReplicationServiceServer was
+	// embedded by pointer and is nil.  This will cause panics if an
+	// unimplemented method is ever invoked, so we test this at initialization
+	// time to prevent it from happening at runtime later due to I/O.
+	if t, ok := srv.(interface{ testEmbeddedByValue() }); ok {
+		t.testEmbeddedByValue()
+	}
+	s.RegisterService(&ReplicationService_ServiceDesc, srv)
+}
+
+func _ReplicationService_ListSymbols_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListSymbolsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ReplicationServiceServer).ListSymbols(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ReplicationService_ListSymbols_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ReplicationServiceServer).ListSymbols(ctx, req.(*ListSymbolsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ReplicationService_StreamWAL_Handler(srv interface{}, stream grpc.ServerStream) error {
+	m := new(StreamWALRequest)
+	if err := stream.RecvMsg(m); err != nil {
+		return err
+	}
+	return srv.(ReplicationServiceServer).StreamWAL(m, &grpc.GenericServerStream[StreamWALRequest, WALBatch]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type ReplicationService_StreamWALServer = grpc.ServerStreamingServer[WALBatch]
+
+func _ReplicationService_ReportProgress_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ReportProgressRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ReplicationServiceServer).ReportProgress(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ReplicationService_ReportProgress_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ReplicationServiceServer).ReportProgress(ctx, req.(*ReportProgressRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ReplicationService_ReplicationStatus_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ReplicationStatusRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ReplicationServiceServer).ReplicationStatus(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ReplicationService_ReplicationStatus_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ReplicationServiceServer).ReplicationStatus(ctx, req.(*ReplicationStatusRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+// ReplicationService_ServiceDesc is the grpc.ServiceDesc for ReplicationService service.
+// It's only intended for direct use with grpc.RegisterService,
+// and not to be introspected or modified (even as a copy)
+var ReplicationService_ServiceDesc = grpc.ServiceDesc{
+	ServiceName: "dhukuti.oms.v1.ReplicationService",
+	HandlerType: (*ReplicationServiceServer)(nil),
+	Methods: []grpc.MethodDesc{
+		{
+			MethodName: "ListSymbols",
+			Handler:    _ReplicationService_ListSymbols_Handler,
+		},
+		{
+			MethodName: "ReportProgress",
+			Handler:    _ReplicationService_ReportProgress_Handler,
+		},
+		{
+			MethodName: "ReplicationStatus",
+			Handler:    _ReplicationService_ReplicationStatus_Handler,
+		},
+	},
+	Streams: []grpc.StreamDesc{
+		{
+			StreamName:    "StreamWAL",
+			Handler:       _ReplicationService_StreamWAL_Handler,
 			ServerStreams: true,
 		},
 	},

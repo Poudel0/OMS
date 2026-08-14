@@ -15,9 +15,9 @@ background load).
 | 3 | **Durable** throughput, WAL append + group-commit fsync before matching, 1/4/16/64 producers | `BenchmarkSequencerWAL_*` on **real storage**: btrfs on LUKS-encrypted Samsung NVMe SSD, `compress=zstd:3`. Raw: `docs/bench/week3-wal-realdisk.txt` | 1: 3,406,059 ns/op @ 1.00 orders/fsync → ~294/sec · 4: 1,762,632 @ 2.03 → ~567/sec · 16: 364,905 @ 10.52 → ~2,741/sec · 64: 79,405 @ 61.30 → ~12,594/sec | 2026-08-14 |
 | 3 | Same, **tmpfs control** (fsync ≈ free) | Identical code, WAL on `/tmp` (tmpfs = RAM). Isolates the WAL's encode/syscall cost from the device flush. Raw: `docs/bench/week3-wal-tmpfs-control.txt` | 1: 22,307 ns/op → ~44,829/sec · 4: 17,048 · 16: 10,602 · 64: 9,765 → ~102,406/sec (9 allocs/op) | 2026-08-14 |
 | 3 | No-WAL sequencer, re-measured in the same run as the two rows above | `BenchmarkSequencer_*`, unchanged code path, for a same-session comparison | 1: 16,866 ns/op → ~59,290/sec · 4: 11,231 · 16: 7,422 · 64: 7,353 → ~136,000/sec | 2026-08-14 |
-
 | 4 | **Full stack** end-to-end: gRPC → registry → sequencer → WAL fsync → matcher → Postgres settlement | `cmd/loadgen`, 64 concurrent gRPC clients across 4 symbols, 30s. WAL on btrfs/LUKS/zstd:3 NVMe; Postgres 17 over a local socket on the same machine. Raw: `docs/bench/week4-grpc-loadtest.txt` | **1,973 orders/sec** · p50 28.9ms · p95 55.7ms · p99 71.3ms · p99.9 132.9ms · 47,293 trades, 0 rejected | 2026-08-14 |
 | 4 | Same, **without the ledger** (isolates settlement cost) | Identical load, server started with no `-db` | **3,910 orders/sec** · p50 14.8ms · p95 27.8ms · p99 32.9ms · p99.9 105.5ms | 2026-08-14 |
+| 5 | Failover: primary + follower under load, `kill -9`, manual promotion | Real processes, 16 clients / 8s / 2 symbols. Raw: `docs/bench/week5-failover-demo.txt` | Follower caught up at 0 records behind; promoted node's depth **byte-identical** to the lost primary's at the same log position (1873); accepted new orders at 1874; journal 2,451 trades, 0 imbalanced, net cash 0 | 2026-08-14 |
 
 ## Notes
 
@@ -72,6 +72,24 @@ background load).
 - **The 136k/sec figure is a no-durability number** and must never be quoted
   as venue throughput. The durable numbers are ~294/sec (1 producer) and
   ~12.6k/sec (64). See [ADR-003](adr/0003-wal-design.md).
+
+### Week 5: replication costs the primary nothing measurable
+
+- **Replication reads the log files, not the sequencer**, so a follower cannot
+  exert backpressure on matching — nothing on the matching path waits for it. That
+  is a design property rather than a measured one, but it is why no
+  "throughput with/without a follower attached" number appears here: there is no
+  mechanism by which one could differ. Worth measuring in Week 6 anyway, precisely
+  because that is the kind of claim that deserves a check.
+- **`kill -9` then promote gives a byte-identical book.** The follower stores
+  records under the primary's positions in the primary's format, so promotion is
+  `omsd -wal <follower-dir>` with no conversion step. See
+  [ADR-006](adr/0006-wal-shipping-replication.md) and
+  [the runbook](failover.md).
+- **The tests found a 5-second replication start latency** for a brand-new symbol:
+  `symbolRefreshInterval` was 5s, so a symbol that had not traded when the
+  follower connected waited for the second discovery pass. Now 500ms. A venue
+  listing a new scrip should not wait seconds for its first order to be protected.
 
 ### Week 4: the end-to-end number, and which one to quote
 

@@ -164,6 +164,26 @@ func (s *Server) PlaceOrder(ctx context.Context, req *pb.PlaceOrderRequest) (*pb
 	}, nil
 }
 
+// GetBookSnapshot returns one symbol's aggregated depth, plus the log position
+// it was taken at.
+func (s *Server) GetBookSnapshot(ctx context.Context, req *pb.GetBookSnapshotRequest) (*pb.GetBookSnapshotResponse, error) {
+	if err := validateSymbol(req.GetSymbol()); err != nil {
+		return nil, err
+	}
+	seq, err := s.reg.Get(req.GetSymbol())
+	if err != nil {
+		return nil, registryError(err)
+	}
+	state, position, err := seq.Snapshot(ctx)
+	if err != nil {
+		return nil, submitError(err)
+	}
+	return &pb.GetBookSnapshotResponse{
+		DepthJson:   string(state),
+		LogPosition: position,
+	}, nil
+}
+
 // CancelOrder removes a resting order, refusing if it belongs to another
 // account.
 func (s *Server) CancelOrder(ctx context.Context, req *pb.CancelOrderRequest) (*pb.CancelOrderResponse, error) {

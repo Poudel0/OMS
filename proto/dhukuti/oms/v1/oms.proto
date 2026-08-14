@@ -23,6 +23,150 @@ service OrderService {
   // starts from the moment of subscription — it is a live feed, not a
   // replayable history, so it makes no durability guarantee of its own.
   rpc StreamTrades(StreamTradesRequest) returns (stream Trade);
+
+  // GetBookSnapshot returns aggregated depth for one symbol. It is served from
+  // inside that symbol's sequencer goroutine, so it is a consistent
+  // point-in-time view rather than a torn read of a book being mutated.
+  //
+  // It exists mainly to compare two nodes: after a failover, "does the promoted
+  // node hold the same book the lost one did" needs an answer that does not
+  // involve reading files by hand.
+  rpc GetBookSnapshot(GetBookSnapshotRequest) returns (GetBookSnapshotResponse);
+}
+
+message GetBookSnapshotRequest {
+  string symbol = 1;
+}
+
+message GetBookSnapshotResponse {
+  // depth_json is L2 depth: total resting quantity per price, both sides, as
+  // JSON. Aggregated rather than per-order, so it exposes no queue positions.
+  string depth_json = 1;
+
+  // log_position is how far this node's log had advanced when the snapshot was
+  // taken, which is what makes two nodes' snapshots comparable.
+  int64 log_position = 2;
+}
+
+// ReplicationService is the primary's side of WAL shipping: a follower streams
+// this node's write-ahead log and replays it into its own books, so it can be
+// promoted by hand if the primary is lost. See ADR-006.
+//
+// It is deliberately a separate service from OrderService. A follower is not a
+// client, the two have completely different trust and availability stories, and
+// keeping them apart means a deployment can expose one without the other.
+service ReplicationService {
+  // ListSymbols reports the symbols this node has logs for, so a follower can
+  // discover what to replicate without being configured with the list.
+  rpc ListSymbols(ListSymbolsRequest) returns (ListSymbolsResponse);
+
+  // StreamWAL streams one symbol's log records from a position onward, and
+  // keeps streaming as new ones are appended. Records are batched as they
+  // become available.
+  //
+  // One stream per symbol, because the logs are per symbol (ADR-005). That
+  // needs no global ordering between symbols and means one lagging symbol
+  // cannot stall the others.
+  rpc StreamWAL(StreamWALRequest) returns (stream WALBatch);
+
+  // ReportProgress lets a follower tell the primary how far it has applied, so
+  // the primary can report replication lag. It is advisory: the primary streams
+  // regardless, and a follower that never reports is simply invisible.
+  rpc ReportProgress(ReportProgressRequest) returns (ReportProgressResponse);
+
+  // ReplicationStatus reports what the primary knows about each symbol's lag.
+  rpc ReplicationStatus(ReplicationStatusRequest) returns (ReplicationStatusResponse);
+}
+
+message ListSymbolsRequest {}
+
+message ListSymbolsResponse {
+  repeated string symbols = 1;
+}
+
+message StreamWALRequest {
+  string symbol = 1;
+
+  // after_position streams records strictly above this log position. A follower
+  // sends the highest position it has durably applied, so 0 means "from the
+  // beginning" and there is no separate full-copy step -- the log IS the
+  // snapshot.
+  int64 after_position = 2;
+}
+
+// WALRecordKind mirrors the two mutations the log replays.
+enum WALRecordKind {
+  WAL_RECORD_KIND_UNSPECIFIED = 0;
+  WAL_RECORD_KIND_SUBMIT = 1;
+  WAL_RECORD_KIND_CANCEL = 2;
+}
+
+message WALRecord {
+  // position is the record's log position, assigned by the primary. The
+  // follower stores records under the primary's positions, never its own:
+  // renumbering would make the follower's log a different log and break resume.
+  int64 position = 1;
+  int64 logged_at_unix_nano = 2;
+  WALRecordKind kind = 3;
+
+  // Set when kind is SUBMIT.
+  Order order = 4;
+
+  // Set when kind is CANCEL.
+  int64 cancel_order_id = 5;
+  // cancel_requested_by carries the ownership constraint the cancel was checked
+  // against. It has to travel: the follower re-evaluates the constraint, so
+  // omitting it would let a cancel that the primary refused succeed on the
+  // follower, and the two books would diverge.
+  string cancel_requested_by = 6;
+}
+
+// Order is an order as the log recorded it, with the venue-assigned id already
+// in place.
+message Order {
+  int64 order_id = 1;
+  string symbol = 2;
+  string account_id = 3;
+  OrderType type = 4;
+  int64 price = 5;
+  int64 quantity = 6;
+  Side side = 7;
+  int64 placed_at_unix_nano = 8;
+}
+
+message WALBatch {
+  repeated WALRecord records = 1;
+  // primary_last_position is the highest position the primary had when it sent
+  // this batch, so a follower can compute its own lag without a round trip.
+  int64 primary_last_position = 2;
+}
+
+message ReportProgressRequest {
+  string symbol = 1;
+  int64 applied_position = 2;
+  // applied_at is the logged_at of the record at applied_position, which is what
+  // turns a lag in records into a lag in time.
+  int64 applied_record_logged_at_unix_nano = 3;
+}
+
+message ReportProgressResponse {}
+
+message ReplicationStatusRequest {}
+
+message SymbolLag {
+  string symbol = 1;
+  int64 primary_position = 2;
+  int64 follower_position = 3;
+  // records_behind is primary_position - follower_position.
+  int64 records_behind = 4;
+  // millis_behind is now minus the logged_at of the follower's last applied
+  // record. It is 0 when no follower has ever reported.
+  int64 millis_behind = 5;
+  bool follower_seen = 6;
+}
+
+message ReplicationStatusResponse {
+  repeated SymbolLag symbols = 1;
 }
 
 // Side is the direction of an order. The unspecified zero value is invalid

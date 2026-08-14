@@ -377,7 +377,7 @@ func TestWAL_RecoverRebuildsIdenticalBookState(t *testing.T) {
 			if err := w.Append(rec); err != nil {
 				t.Fatalf("Append() error = %v", err)
 			}
-			rec.apply(live)
+			rec.Apply(live)
 			continue
 		}
 		side := Buy
@@ -396,7 +396,7 @@ func TestWAL_RecoverRebuildsIdenticalBookState(t *testing.T) {
 		if err := w.Append(rec); err != nil {
 			t.Fatalf("Append() error = %v", err)
 		}
-		rec.apply(live)
+		rec.Apply(live)
 		if orderType == Limit {
 			resting = append(resting, o.SeqID)
 		}
@@ -486,7 +486,7 @@ func TestWAL_FailedCancelIsStillLoggedAndReplaysIdentically(t *testing.T) {
 		if err := w.Append(rec); err != nil {
 			t.Fatal(err)
 		}
-		rec.apply(live)
+		rec.Apply(live)
 	}
 	w.Close()
 
