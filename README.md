@@ -12,7 +12,8 @@ before the next one starts. Current state:
 
 - [x] Order book: LIMIT + MARKET matching, price-time priority, O(1) cancel
 - [x] Single-writer sequencer per symbol (channel-fed goroutine)
-- [ ] Write-ahead log + crash recovery
+- [x] Write-ahead log + crash recovery (group-commit fsync, CRC'd records,
+      segment rotation, subprocess crash test)
 - [ ] Multi-symbol registry
 - [ ] gRPC API (PlaceOrder / CancelOrder / StreamTrades)
 - [ ] Postgres double-entry settlement, idempotent on trade ID
@@ -66,12 +67,48 @@ why this is the chosen design even though a plain `sync.Mutex` measures
 faster for a single symbol in isolation (`book_mutex.go` is kept in the repo
 as a permanent comparison baseline, not a throwaway).
 
+## Write-ahead log
+
+`Sequencer` is also where durability lives. Every mutation is appended to a
+CRC-checked log and fsynced **before** the book is allowed to see it, so a
+trade is never acknowledged unless it is already recoverable. If the fsync
+fails, the book is not touched and the whole batch is rejected.
+
+- `OpenWriter(dir)` / `Append` / `Sync` — `Append` only buffers; `Sync` is the
+  fsync. Splitting them is what allows group commit.
+- `Recover(dir, book, afterSeq)` — replays every segment into a book and
+  returns the highest log position seen.
+- `Reader.Records()` returns an `iter.Seq2[Record, error]`, stopping at the
+  first bad record.
+
+The sequencer drains every request already queued behind the first, appends
+them all, and fsyncs **once**. No timer and no linger interval — queue depth
+is the signal, so batches grow exactly when load makes them worth having.
+That is worth 43× durable throughput between 1 and 64 producers, and the
+benchmarks report the measured `orders/fsync` ratio that explains it.
+
+A truncated tail (bytes that never reached disk, so were never acknowledged)
+is recovered from silently and truncated away. A CRC mismatch — bytes that are
+present but wrong — halts replay with `ErrCorruptWAL` and refuses to append on
+top. See [ADR-003](docs/adr/0003-wal-design.md), including what replay
+deliberately does *not* reproduce.
+
+Crash recovery is tested by actually crashing: `TestChaos_*` runs the engine
+in a child process, panics it mid-stream after 10,000 mutations, and asserts
+the recovered book matches the pre-crash state exactly.
+
 ```sh
-go test ./internal/oms/... -race                                        # correctness + property tests, race-checked
+go test ./internal/oms/... -race                                        # correctness + property + crash-recovery tests, race-checked
 go test -bench=BenchmarkSubmit -benchtime=10s -benchmem ./internal/oms/  # single-threaded throughput
 go test -bench='BenchmarkSequencer_|BenchmarkMutex_' -benchtime=2s -benchmem ./internal/oms/  # channel vs mutex, 1/4/16/64 producers
+OMS_BENCH_WAL_DIR=$HOME/.cache go test -bench=SequencerWAL -benchtime=2s -benchmem ./internal/oms/  # durable throughput on REAL storage
 go build -o bench ./cmd/bench && ./bench                                # multi-hour unattended stress simulation
 ```
+
+`OMS_BENCH_WAL_DIR` is not optional for a number you intend to quote: without
+it the WAL benchmarks write to `$TMPDIR`, which on most Linux desktops is a
+tmpfs, where fsync is nearly free and the result measures encoding overhead
+rather than durability.
 
 ## Design decisions
 
@@ -80,6 +117,7 @@ alongside the code that implements it:
 
 - [ADR-001: L3 order book as a price-indexed map of FIFO queues](docs/adr/0001-order-book-data-structure.md)
 - [ADR-002: Single-writer goroutine per symbol, channel-fed](docs/adr/0002-single-writer-sequencer.md)
+- [ADR-003: WAL with group-commit fsync and deterministic replay](docs/adr/0003-wal-design.md)
 
 More land as the corresponding subsystem is built (WAL, settlement,
 multi-symbol partitioning, replication).

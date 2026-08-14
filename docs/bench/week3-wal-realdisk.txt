@@ -1,0 +1,14 @@
+goos: linux
+goarch: amd64
+pkg: github.com/Poudel0/OMS/internal/oms
+cpu: AMD Ryzen 5 4600H with Radeon Graphics         
+BenchmarkSequencer_1-12        	  167366	     16866 ns/op	     337 B/op	       3 allocs/op
+BenchmarkSequencer_4-12        	  213825	     11231 ns/op	     343 B/op	       3 allocs/op
+BenchmarkSequencer_16-12       	  297398	      7422 ns/op	     338 B/op	       3 allocs/op
+BenchmarkSequencer_64-12       	  328404	      7353 ns/op	     337 B/op	       3 allocs/op
+BenchmarkSequencerWAL_1-12     	     664	   3406059 ns/op	         1.000 orders/fsync	     769 B/op	       9 allocs/op
+BenchmarkSequencerWAL_4-12     	    1274	   1762632 ns/op	         2.025 orders/fsync	     719 B/op	       9 allocs/op
+BenchmarkSequencerWAL_16-12    	    5535	    364905 ns/op	        10.52 orders/fsync	     715 B/op	       9 allocs/op
+BenchmarkSequencerWAL_64-12    	   30417	     79405 ns/op	        61.30 orders/fsync	     704 B/op	       9 allocs/op
+PASS
+ok  	github.com/Poudel0/OMS/internal/oms	20.776s

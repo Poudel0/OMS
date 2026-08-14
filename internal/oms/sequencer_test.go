@@ -58,20 +58,27 @@ func TestSequencer_ContextCancellationDoesNotHang(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	book := NewBook()
 	seq := NewSequencer(ctx, book)
-	cancel() // sequencer goroutine exits before we ever call Submit
+
+	// cancel() only *requests* shutdown; it does not wait for it. Submitting
+	// straight after it would race the sequencer goroutine, which is sitting
+	// in a select where both the incoming request and ctx.Done() are ready —
+	// and Go picks among ready select cases at random, so it would serve one
+	// last order about half the time. Wait for the goroutine to actually be
+	// gone, which is what Done() reports, before asserting that a closed
+	// sequencer rejects work.
+	cancel()
+	select {
+	case <-seq.Done():
+	case <-time.After(time.Second):
+		t.Fatal("Done() never closed after context cancellation")
+	}
 
 	callCtx, callCancel := context.WithTimeout(context.Background(), time.Second)
 	defer callCancel()
 
 	_, err := seq.Submit(callCtx, Order{SeqID: 1, Side: Buy, Type: Limit, Price: 100, Quantity: 50})
 	if err != ErrSequencerClosed {
-		t.Fatalf("Submit() after context cancel = %v, want ErrSequencerClosed", err)
-	}
-
-	select {
-	case <-seq.Done():
-	case <-time.After(time.Second):
-		t.Fatal("Done() never closed after context cancellation")
+		t.Fatalf("Submit() after sequencer shutdown = %v, want ErrSequencerClosed", err)
 	}
 }
 

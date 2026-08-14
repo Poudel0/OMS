@@ -3,6 +3,7 @@ package oms
 import (
 	"fmt"
 	"math/rand"
+	"os"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -97,6 +98,71 @@ func BenchmarkSequencer_1(b *testing.B)  { benchmarkSequencer(b, 1) }
 func BenchmarkSequencer_4(b *testing.B)  { benchmarkSequencer(b, 4) }
 func BenchmarkSequencer_16(b *testing.B) { benchmarkSequencer(b, 16) }
 func BenchmarkSequencer_64(b *testing.B) { benchmarkSequencer(b, 64) }
+
+// benchmarkSequencerWAL measures the same workload with durability turned on:
+// every batch is appended and fsynced before any of it is matched. The gap
+// against BenchmarkSequencer_* is the price of crash recovery, and it should
+// *narrow* as producers rise — more concurrent producers mean more requests
+// waiting in the channel, which means bigger group commits and fewer fsyncs
+// per order. See ADR-003.
+//
+// This one writes to a real file, so unlike every other benchmark here its
+// result depends on the storage underneath — see benchWALDir.
+func benchmarkSequencerWAL(b *testing.B, producers int) {
+	ctx := b.Context()
+	w, err := OpenWriter(benchWALDir(b))
+	if err != nil {
+		b.Fatalf("OpenWriter() error = %v", err)
+	}
+	seq := NewSequencerWithWAL(ctx, NewBook(), w)
+	runConcurrent(b, producers, func(o Order) ([]Trade, error) {
+		resp, err := seq.Submit(ctx, o)
+		return resp.Trades, err
+	})
+	b.StopTimer()
+	if err := seq.Close(); err != nil {
+		b.Fatalf("Close() error = %v", err)
+	}
+	// Report the mean group-commit size: how many orders each fsync served.
+	// This is the mechanism the ns/op figures above are explained by, so it
+	// belongs in the same output rather than in a separate hand-waved claim.
+	if commits, requests := seq.CommitStats(); commits > 0 {
+		b.ReportMetric(float64(requests)/float64(commits), "orders/fsync")
+	}
+}
+
+// benchWALDir picks where the WAL benchmarks write.
+//
+// The default, b.TempDir(), lands under $TMPDIR — which on most Linux desktops
+// (this one included) is a tmpfs, i.e. RAM. fsync against tmpfs barely costs
+// anything, so that configuration does NOT measure the price of durability.
+// It is still worth having as a control: it isolates the WAL's own encoding
+// and syscall overhead from whatever the storage device charges to flush.
+//
+// For the number that actually means "what crash recovery costs", point
+// OMS_BENCH_WAL_DIR at a directory on real storage:
+//
+//	OMS_BENCH_WAL_DIR=$HOME/.cache go test -bench=SequencerWAL -benchtime=2s ./internal/oms/
+//
+// Report which of the two any published figure came from. A tmpfs fsync
+// number presented as a durability number is an invented number.
+func benchWALDir(b *testing.B) string {
+	parent := os.Getenv("OMS_BENCH_WAL_DIR")
+	if parent == "" {
+		return b.TempDir()
+	}
+	dir, err := os.MkdirTemp(parent, "oms-bench-wal-")
+	if err != nil {
+		b.Fatalf("create wal bench dir under %s: %v", parent, err)
+	}
+	b.Cleanup(func() { os.RemoveAll(dir) })
+	return dir
+}
+
+func BenchmarkSequencerWAL_1(b *testing.B)  { benchmarkSequencerWAL(b, 1) }
+func BenchmarkSequencerWAL_4(b *testing.B)  { benchmarkSequencerWAL(b, 4) }
+func BenchmarkSequencerWAL_16(b *testing.B) { benchmarkSequencerWAL(b, 16) }
+func BenchmarkSequencerWAL_64(b *testing.B) { benchmarkSequencerWAL(b, 64) }
 
 func benchmarkMutex(b *testing.B, producers int) {
 	mb := NewMutexBook()
