@@ -1,0 +1,32 @@
+# Week 4 gRPC load test — full stack (gRPC -> registry -> sequencer -> WAL fsync -> matcher -> Postgres settlement)
+# Hardware: AMD Ryzen 5 4600H, 12 threads. WAL on btrfs/LUKS/zstd:3 on Samsung NVMe. Postgres via local socket, same machine.
+# Command: loadgen -workers 64 -duration 30s -accounts 8   (4 symbols: NABIL,ADBL,HBL,NRIC)
+
+## WAL + Postgres settlement (the honest durable number)
+target        127.0.0.1:19098
+workers       64
+symbols       [NABIL ADBL HBL NRIC]
+wall clock    30.001s
+accepted      59197 orders
+rejected      0
+trades        47293
+throughput    1973 orders/sec
+latency
+  p50         28.918ms
+  p95         55.713ms
+  p99         71.337ms
+  p99.9       132.92ms
+  max         165.185ms
+
+## Journal integrity after the run above
+rows: 189288 | trades: 47322 | legs per trade: 4 for all 47322 | imbalanced groups: 0 | net cash: 0 | net shares: 0
+
+## WAL, NO ledger (isolates settlement cost)
+accepted      117316 orders
+trades        93891
+throughput    3910 orders/sec
+p50           14.751ms
+p95           27.809ms
+p99           32.934ms
+p99.9         105.461ms
+max           483.295ms

@@ -13,3 +13,8 @@
 
 # editor
 .idea/
+# generated tool binaries (see `make proto`)
+/.tools/
+
+# local runtime data (server default -wal path)
+/data/

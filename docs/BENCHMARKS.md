@@ -16,6 +16,9 @@ background load).
 | 3 | Same, **tmpfs control** (fsync ≈ free) | Identical code, WAL on `/tmp` (tmpfs = RAM). Isolates the WAL's encode/syscall cost from the device flush. Raw: `docs/bench/week3-wal-tmpfs-control.txt` | 1: 22,307 ns/op → ~44,829/sec · 4: 17,048 · 16: 10,602 · 64: 9,765 → ~102,406/sec (9 allocs/op) | 2026-08-14 |
 | 3 | No-WAL sequencer, re-measured in the same run as the two rows above | `BenchmarkSequencer_*`, unchanged code path, for a same-session comparison | 1: 16,866 ns/op → ~59,290/sec · 4: 11,231 · 16: 7,422 · 64: 7,353 → ~136,000/sec | 2026-08-14 |
 
+| 4 | **Full stack** end-to-end: gRPC → registry → sequencer → WAL fsync → matcher → Postgres settlement | `cmd/loadgen`, 64 concurrent gRPC clients across 4 symbols, 30s. WAL on btrfs/LUKS/zstd:3 NVMe; Postgres 17 over a local socket on the same machine. Raw: `docs/bench/week4-grpc-loadtest.txt` | **1,973 orders/sec** · p50 28.9ms · p95 55.7ms · p99 71.3ms · p99.9 132.9ms · 47,293 trades, 0 rejected | 2026-08-14 |
+| 4 | Same, **without the ledger** (isolates settlement cost) | Identical load, server started with no `-db` | **3,910 orders/sec** · p50 14.8ms · p95 27.8ms · p99 32.9ms · p99.9 105.5ms | 2026-08-14 |
+
 ## Notes
 
 - The first two attempts at this number (798 ns/op and 2561–4001 ns/op) were
@@ -69,3 +72,28 @@ background load).
 - **The 136k/sec figure is a no-durability number** and must never be quoted
   as venue throughput. The durable numbers are ~294/sec (1 producer) and
   ~12.6k/sec (64). See [ADR-003](adr/0003-wal-design.md).
+
+### Week 4: the end-to-end number, and which one to quote
+
+- **Quote 1,973 orders/sec.** That is the whole system doing its actual job:
+  gRPC in, validated, balance-checked, durably logged, matched, and journalled
+  to Postgres in a double-entry transaction. Every other number on this page is
+  a component measured in isolation.
+- **Settlement roughly halves throughput and doubles median latency**
+  (3,910 → 1,973 orders/sec, p50 14.8ms → 28.9ms). Two thirds of the way down
+  this stack, the interesting concurrency work is being paid for by two fsyncs:
+  one in the WAL, one in Postgres's own commit. The obvious next lever is
+  batching settlement the way the WAL already batches appends — one transaction
+  per group commit rather than per order.
+- **This does not demonstrate per-symbol scaling.** Proving ADR-005's
+  partitioning claim needs the same total load spread across 1/2/4/8 symbols,
+  which has not been run. Expect less than linear: every symbol's group commit
+  fsyncs to the same physical device, and four sequencers do not get four disks.
+- **The load test found two bugs the unit tests could not**, both recorded in
+  [ADR-004](adr/0004-synchronous-settlement.md): a settlement context that
+  inherited client cancellation, and an idempotency key that silently dropped
+  half of every self-trade's journal legs (12,266 rows missing, net cash
+  -40,013,771 where it should have been 0). Unit tests chose tidy inputs; a
+  random workload self-traded within seconds. **After the fix: 47,322 trades,
+  all with exactly 4 legs, 0 imbalanced groups, net cash and net shares both 0.**
+  Run `Ledger.Imbalance` against a real journal after any load test.

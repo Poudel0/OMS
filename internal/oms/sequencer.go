@@ -24,8 +24,11 @@ type OrderResponse struct {
 	// Seq is the write-ahead log position assigned to this request, or 0 if
 	// the sequencer has no WAL. It is a log position, not an order ID — see
 	// Record.
-	Seq    int64
-	Trades []Trade
+	Seq int64
+	// OrderID is the order's identifier: either the one the caller supplied,
+	// or the one the sequencer assigned if the caller left it zero.
+	OrderID SeqID
+	Trades  []Trade
 	// QueueLatency is how long the request waited before the sequencer
 	// goroutine started processing its batch — time spent behind other
 	// requests.
@@ -44,19 +47,33 @@ type OrderResponse struct {
 // earlier, because a Go select among ready cases picks at random.
 type request struct {
 	kind     RecordKind
-	order    Order // kind == RecordSubmit
-	cancelID SeqID // kind == RecordCancel
-	seq      int64 // assigned by the sequencer at commit time
+	order    Order  // kind == RecordSubmit
+	cancelID SeqID  // kind == RecordCancel
+	cancelBy string // kind == RecordCancel; "" means skip the ownership check
+	seq      int64  // assigned by the sequencer at commit time
+	orderID  SeqID  // assigned by the sequencer at commit time, if it assigns
 	reply    chan result
 }
 
 type result struct {
 	seq         int64
+	orderID     SeqID
 	trades      []Trade
 	err         error
 	pickedUpAt  time.Time
 	respondedAt time.Time
 }
+
+// ErrNotOrderOwner reports a cancel for an order placed by a different
+// account.
+//
+// The account making the claim is not authenticated in v1 (see ADR-005), so
+// this check is only as strong as the account_id the caller sent. It is still
+// worth having now rather than later: order IDs are sequential integers, so
+// without it any client could cancel any other client's orders by guessing,
+// and adding authentication later makes this check real without changing the
+// logic around it.
+var ErrNotOrderOwner = errors.New("oms: order belongs to another account")
 
 // Reply channels are the hottest allocation in Submit/Cancel — profiling
 // showed them dominating allocated objects under concurrent load (see
@@ -81,6 +98,20 @@ var replyPool = sync.Pool{New: func() any { return make(chan result, 1) }}
 // queued, appends them all to the log, fsyncs once, and only then applies any
 // of them to the book. See ADR-003.
 type Sequencer struct {
+	// OnTrades, if set, is called with every batch of trades as they execute,
+	// from inside the sequencer goroutine. That placement is the point: it is
+	// the only spot where trade order is total, so a market-data feed fed from
+	// here cannot publish trades out of the order they matched in.
+	//
+	// The cost of that guarantee is that OnTrades runs on the critical path and
+	// must not block — a slow subscriber has to be dropped, not waited for.
+	//
+	// Set it before the first Submit and never again. It needs no lock: the
+	// goroutine only reads it while handling a request, which necessarily
+	// happens after the send that delivered that request, which happens after
+	// the write here.
+	OnTrades func([]Trade)
+
 	book *Book
 	wal  *Writer
 	reqs chan request
@@ -89,10 +120,11 @@ type Sequencer struct {
 	once sync.Once
 
 	// Owned exclusively by the sequencer goroutine.
-	seq     int64
-	walErr  error
-	commits int64 // group commits performed
-	batched int64 // requests those commits covered
+	seq         int64
+	nextOrderID SeqID
+	walErr      error
+	commits     int64 // group commits performed
+	batched     int64 // requests those commits covered
 
 	// shutdownErr is written before close(done) and only read after a
 	// receive from done, which is what makes that unsynchronized access safe.
@@ -125,6 +157,9 @@ func NewSequencerWithWAL(ctx context.Context, book *Book, wal *Writer) *Sequence
 	if wal != nil {
 		s.seq = wal.LastSeq()
 	}
+	// Resume order-ID assignment above every order the book already holds, so
+	// a restart cannot hand a new order the ID of one still resting.
+	s.nextOrderID = book.MaxOrderID()
 	go s.run(ctx)
 	return s
 }
@@ -175,6 +210,18 @@ func (s *Sequencer) commit(batch []request) {
 	s.commits++
 	s.batched += int64(len(batch))
 
+	// Order IDs are assigned before the log is written, never after: the log
+	// has to carry the same ID the caller was told about, or replay would
+	// resurrect the order under a different identity and no cancel would ever
+	// find it again.
+	for i := range batch {
+		if batch[i].kind == RecordSubmit && batch[i].order.SeqID == 0 {
+			s.nextOrderID++
+			batch[i].order.SeqID = s.nextOrderID
+		}
+		batch[i].orderID = batch[i].order.SeqID
+	}
+
 	if s.wal != nil && s.walErr == nil {
 		startSeq := s.seq
 		if err := s.logBatch(batch, pickedUpAt); err != nil {
@@ -189,14 +236,17 @@ func (s *Sequencer) commit(batch []request) {
 
 	for i := range batch {
 		req := batch[i]
-		res := result{seq: req.seq, pickedUpAt: pickedUpAt}
+		res := result{seq: req.seq, orderID: req.orderID, pickedUpAt: pickedUpAt}
 		switch {
 		case s.walErr != nil:
 			res.err = s.walErr
 		case req.kind == RecordCancel:
-			res.err = s.book.Cancel(req.cancelID)
+			res.err = s.book.CancelOwned(req.cancelID, req.cancelBy)
 		default:
 			res.trades, res.err = s.book.Submit(req.order)
+			if len(res.trades) > 0 && s.OnTrades != nil {
+				s.OnTrades(res.trades)
+			}
 		}
 		res.respondedAt = time.Now()
 		req.reply <- res
@@ -210,6 +260,7 @@ func (s *Sequencer) logBatch(batch []request, ts time.Time) error {
 		rec := Record{Seq: s.seq, Kind: batch[i].kind, TS: ts}
 		if batch[i].kind == RecordCancel {
 			rec.CancelID = batch[i].cancelID
+			rec.CancelBy = batch[i].cancelBy
 		} else {
 			rec.Order = batch[i].order
 		}
@@ -257,6 +308,13 @@ func (s *Sequencer) do(ctx context.Context, req request) (result, error) {
 // until ctx is cancelled — whichever comes first. Safe to call from any
 // number of goroutines concurrently; the book itself is only ever touched
 // by the one sequencer goroutine.
+//
+// If o.SeqID is zero the sequencer assigns the order ID itself and reports it
+// as OrderResponse.OrderID. That is how anything reachable from the network
+// should submit: order IDs are sequential, so letting a client choose its own
+// would let it claim an identifier another account's order already holds. A
+// non-zero o.SeqID is honoured as-is, which is what the benchmarks and the
+// book's own tests rely on.
 func (s *Sequencer) Submit(ctx context.Context, o Order) (OrderResponse, error) {
 	sentAt := time.Now()
 	res, err := s.do(ctx, request{kind: RecordSubmit, order: o})
@@ -265,17 +323,31 @@ func (s *Sequencer) Submit(ctx context.Context, o Order) (OrderResponse, error) 
 	}
 	return OrderResponse{
 		Seq:          res.seq,
+		OrderID:      res.orderID,
 		Trades:       res.trades,
 		QueueLatency: res.pickedUpAt.Sub(sentAt),
 		TotalLatency: res.respondedAt.Sub(sentAt),
 	}, nil
 }
 
-// Cancel removes a resting order by SeqID, same blocking/cancellation
-// semantics as Submit.
+// Cancel removes a resting order by ID, with no ownership check. Use
+// CancelFor for anything that came off the network.
 func (s *Sequencer) Cancel(ctx context.Context, orderID SeqID) error {
 	_, err := s.do(ctx, request{kind: RecordCancel, cancelID: orderID})
 	return err
+}
+
+// CancelFor removes a resting order only if account placed it, failing with
+// ErrNotOrderOwner otherwise. Same blocking and cancellation semantics as
+// Submit.
+//
+// The check happens inside the sequencer goroutine, so the lookup of the
+// order's owner and its removal cannot be separated by another mutation —
+// there is no window in which the order could be filled and its ID reused
+// between the two.
+func (s *Sequencer) CancelFor(ctx context.Context, orderID SeqID, account string) (int64, error) {
+	res, err := s.do(ctx, request{kind: RecordCancel, cancelID: orderID, cancelBy: account})
+	return res.seq, err
 }
 
 // Close stops the sequencer, waits for its goroutine to exit, and closes the

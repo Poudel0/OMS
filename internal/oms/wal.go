@@ -83,8 +83,9 @@ type Record struct {
 	Seq      int64
 	Kind     RecordKind
 	TS       time.Time
-	Order    Order // set when Kind == RecordSubmit
-	CancelID SeqID // set when Kind == RecordCancel
+	Order    Order  // set when Kind == RecordSubmit
+	CancelID SeqID  // set when Kind == RecordCancel
+	CancelBy string // set when Kind == RecordCancel; the account that asked
 }
 
 // walPayload is the variable part of a record. It is JSON rather than a
@@ -100,6 +101,11 @@ type walPayload struct {
 	Kind     RecordKind `json:"k"`
 	Order    *Order     `json:"o,omitempty"`
 	CancelID SeqID      `json:"c,omitempty"`
+	// CancelBy has to be logged, not just checked: replay re-evaluates the
+	// ownership constraint, so a log that omitted it would allow on replay a
+	// cancel that was refused when it was live, and the recovered book would
+	// differ from the one that was lost.
+	CancelBy string `json:"cb,omitempty"`
 }
 
 // apply replays this record against book, discarding the mutation's error.
@@ -115,7 +121,7 @@ func (rec Record) apply(book *Book) {
 	case RecordSubmit:
 		_, _ = book.Submit(rec.Order)
 	case RecordCancel:
-		_ = book.Cancel(rec.CancelID)
+		_ = book.CancelOwned(rec.CancelID, rec.CancelBy)
 	}
 }
 
@@ -205,7 +211,9 @@ func (w *Writer) LastSeq() int64 { return w.lastSeq }
 // push the current one past MaxSegmentBytes. It does not make rec durable —
 // call Sync for that.
 func (w *Writer) Append(rec Record) error {
-	payload, err := json.Marshal(walPayload{Kind: rec.Kind, Order: orderPtr(rec), CancelID: rec.CancelID})
+	payload, err := json.Marshal(walPayload{
+		Kind: rec.Kind, Order: orderPtr(rec), CancelID: rec.CancelID, CancelBy: rec.CancelBy,
+	})
 	if err != nil {
 		return fmt.Errorf("oms: marshal wal payload: %w", err)
 	}
@@ -440,6 +448,7 @@ func (r *Reader) next() (Record, error) {
 		Kind:     p.Kind,
 		TS:       time.Unix(0, int64(binary.LittleEndian.Uint64(hdr[12:20]))),
 		CancelID: p.CancelID,
+		CancelBy: p.CancelBy,
 	}
 	if p.Order != nil {
 		rec.Order = *p.Order

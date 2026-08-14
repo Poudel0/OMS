@@ -1,0 +1,122 @@
+syntax = "proto3";
+
+package dhukuti.oms.v1;
+
+option go_package = "github.com/Poudel0/OMS/internal/pb;pb";
+
+// OrderService is the venue's public API for one trading node.
+//
+// Prices and quantities are integers throughout. NEPSE instruments trade in
+// discrete price ticks, so a float price would introduce rounding error into
+// the one place the system must be exact; see ADR-001.
+service OrderService {
+  // PlaceOrder submits an order and returns synchronously, once the order is
+  // durable and matched. The response carries every trade the order produced.
+  rpc PlaceOrder(PlaceOrderRequest) returns (PlaceOrderResponse);
+
+  // CancelOrder removes a resting order. Cancelling an order that already
+  // filled or was already cancelled fails; the venue does not distinguish
+  // those cases from an unknown ID.
+  rpc CancelOrder(CancelOrderRequest) returns (CancelOrderResponse);
+
+  // StreamTrades pushes trades for one symbol as they execute. The stream
+  // starts from the moment of subscription — it is a live feed, not a
+  // replayable history, so it makes no durability guarantee of its own.
+  rpc StreamTrades(StreamTradesRequest) returns (stream Trade);
+}
+
+// Side is the direction of an order. The unspecified zero value is invalid
+// rather than defaulting, so a caller that forgets the field is rejected
+// instead of silently having its order treated as a buy.
+enum Side {
+  SIDE_UNSPECIFIED = 0;
+  SIDE_BUY = 1;
+  SIDE_SELL = 2;
+}
+
+// OrderType is LIMIT or MARKET. Unspecified is invalid, same reasoning as Side.
+enum OrderType {
+  ORDER_TYPE_UNSPECIFIED = 0;
+  ORDER_TYPE_LIMIT = 1;
+  ORDER_TYPE_MARKET = 2;
+}
+
+message PlaceOrderRequest {
+  // symbol is the instrument, e.g. "NABIL". Uppercase A-Z0-9, max 12 chars.
+  string symbol = 1;
+
+  // account_id is the account the order is placed for. Authenticating that
+  // the caller is entitled to act for this account is out of scope for v1
+  // (see ADR-005) — the field is trusted as sent.
+  string account_id = 2;
+
+  Side side = 3;
+  OrderType type = 4;
+
+  // price is in ticks and is ignored for MARKET orders.
+  int64 price = 5;
+  int64 quantity = 6;
+}
+
+message PlaceOrderResponse {
+  // order_id is assigned by the venue, not the client. A client-supplied ID
+  // would let one client claim another's identifier and then cancel its
+  // orders.
+  int64 order_id = 1;
+
+  // log_position is the order's write-ahead log position, durable before any
+  // matching happened. It is not an order ID — cancels get positions too.
+  int64 log_position = 2;
+
+  // trades is every execution this order caused, in match order. Empty means
+  // the order rested without crossing anything.
+  repeated Trade trades = 3;
+
+  // resting_quantity is what remains in the book. A MARKET order's unfilled
+  // remainder is dropped rather than rested, so this is always 0 for MARKET.
+  int64 resting_quantity = 4;
+}
+
+message CancelOrderRequest {
+  string symbol = 1;
+  int64 order_id = 2;
+
+  // account_id must match the account that placed the order. Same v1 caveat
+  // as PlaceOrderRequest.account_id: the claim is checked but not
+  // authenticated.
+  string account_id = 3;
+}
+
+message CancelOrderResponse {
+  int64 log_position = 1;
+}
+
+message StreamTradesRequest {
+  string symbol = 1;
+}
+
+message Trade {
+  // trade_id is unique within a symbol.
+  int64 trade_id = 1;
+  string symbol = 2;
+
+  // price is always the resting (maker) order's price, never the incoming
+  // taker's — the taker crossed a price that was already on offer.
+  int64 price = 3;
+  int64 quantity = 4;
+
+  int64 maker_order_id = 5;
+  int64 taker_order_id = 6;
+  string maker_account_id = 7;
+  string taker_account_id = 8;
+
+  // executed_at is a metric, not an ordering key. Matching order is
+  // determined by log position, and replay does not reproduce this field —
+  // see ADR-003.
+  int64 executed_at_unix_nano = 9;
+
+  // taker_side is the incoming order's direction, which is what says who
+  // bought: on SIDE_BUY the taker pays cash and receives shares. Without it a
+  // trade names both parties but not which way value moved.
+  Side taker_side = 10;
+}

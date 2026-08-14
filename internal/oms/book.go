@@ -4,6 +4,7 @@ import (
 	"container/list"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"sort"
 	"time"
 )
@@ -63,6 +64,20 @@ type Book struct {
 	asks   []Price // ascending, best ask first
 	index  map[SeqID]OrderRef
 	levels map[Price]*priceLevel
+
+	// nextTradeID numbers this symbol's trades. It lives on the Book, not on
+	// the Sequencer, because that is what makes it survive replay: trades are
+	// not written to the write-ahead log, they are re-derived by re-running the
+	// matching (ADR-003). A counter kept anywhere else would hand different
+	// IDs to the same trades after a restart, and settlement is idempotent on
+	// trade ID (ADR-004) — so different IDs would mean double-posting the same
+	// execution to the ledger.
+	nextTradeID SeqID
+
+	// maxOrderID is the highest order ID this book has seen, so that a
+	// sequencer assigning IDs after recovery resumes above every recovered
+	// order rather than colliding with one still resting.
+	maxOrderID SeqID
 }
 
 var _ OrderBook = (*Book)(nil)
@@ -150,6 +165,14 @@ func (b *Book) BestAsk() (Price, bool) {
 	return 0, false
 }
 
+// MaxOrderID reports the highest order ID this book has seen, including orders
+// that have since filled or been cancelled. A sequencer that assigns order IDs
+// resumes from here after recovery so it cannot reissue an ID that a resting
+// order still holds.
+func (b *Book) MaxOrderID() SeqID {
+	return b.maxOrderID
+}
+
 // RestingCount reports how many orders are currently resting in the book
 // (both sides combined). Useful for depth-based load shaping in load
 // generators/benchmarks, not used by matching itself.
@@ -208,6 +231,9 @@ func (b *Book) Submit(o Order) (trades []Trade, err error) {
 	if o.Side == UnknownSide || o.Type == UnknownType {
 		return nil, errors.New("oms: order has unknown side or type")
 	}
+	if o.SeqID > b.maxOrderID {
+		b.maxOrderID = o.SeqID
+	}
 	switch o.Side {
 	case Buy:
 		trades, o, err = b.matchAgainstAsks(o)
@@ -242,7 +268,9 @@ func (b *Book) matchAgainstAsks(taker Order) (trades []Trade, remainder Order, e
 
 		fill := min(taker.Quantity, maker.Quantity)
 
+		b.nextTradeID++
 		trades = append(trades, Trade{
+			SeqID:      b.nextTradeID,
 			Symbol:     taker.Symbol,
 			Price:      askingPrice, // maker's price wins
 			MakerSeqID: maker.SeqID,
@@ -250,6 +278,7 @@ func (b *Book) matchAgainstAsks(taker Order) (trades []Trade, remainder Order, e
 			MakerAccID: maker.Placer,
 			TakerAccID: taker.Placer,
 			Quantity:   fill,
+			TakerSide:  Buy, // taker crossed the ask, so the taker is buying
 			TimeStamp:  time.Now(),
 		})
 
@@ -283,7 +312,9 @@ func (b *Book) matchAgainstBids(taker Order) (trades []Trade, remainder Order, e
 
 		fill := min(taker.Quantity, maker.Quantity)
 
+		b.nextTradeID++
 		trades = append(trades, Trade{
+			SeqID:      b.nextTradeID,
 			Symbol:     taker.Symbol,
 			Price:      biddingPrice, // maker's price wins
 			MakerSeqID: maker.SeqID,
@@ -291,6 +322,7 @@ func (b *Book) matchAgainstBids(taker Order) (trades []Trade, remainder Order, e
 			MakerAccID: maker.Placer,
 			TakerAccID: taker.Placer,
 			Quantity:   fill,
+			TakerSide:  Sell, // taker crossed the bid, so the taker is selling
 			TimeStamp:  time.Now(),
 		})
 
@@ -316,9 +348,23 @@ func (b *Book) matchAgainstBids(taker Order) (trades []Trade, remainder Order, e
 // cancel-reject ("too late, it already traded") apart from a bad ID, which
 // would need tracking terminal orders separately. Not needed yet.
 func (b *Book) Cancel(orderID SeqID) error {
+	return b.CancelOwned(orderID, "")
+}
+
+// CancelOwned is Cancel with an ownership constraint: if by is non-empty, the
+// resting order must have been placed by that account or the cancel is
+// refused with ErrNotOrderOwner.
+//
+// Both the live path and replay go through here so the two cannot disagree
+// about whether a given cancel was allowed — a divergence there would make a
+// recovered book differ from the one that was lost.
+func (b *Book) CancelOwned(orderID SeqID, by string) error {
 	ref, ok := b.index[orderID]
 	if !ok {
 		return errors.New("oms: order not found")
+	}
+	if by != "" && ref.element.Value.(Order).Placer != by {
+		return fmt.Errorf("%w: order %d", ErrNotOrderOwner, orderID)
 	}
 	ref.level.orders.Remove(ref.element)
 	delete(b.index, orderID)

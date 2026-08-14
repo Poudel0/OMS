@@ -14,9 +14,9 @@ before the next one starts. Current state:
 - [x] Single-writer sequencer per symbol (channel-fed goroutine)
 - [x] Write-ahead log + crash recovery (group-commit fsync, CRC'd records,
       segment rotation, subprocess crash test)
-- [ ] Multi-symbol registry
-- [ ] gRPC API (PlaceOrder / CancelOrder / StreamTrades)
-- [ ] Postgres double-entry settlement, idempotent on trade ID
+- [x] Multi-symbol registry (one goroutine, book, and log per symbol)
+- [x] gRPC API (PlaceOrder / CancelOrder / StreamTrades)
+- [x] Postgres double-entry settlement, idempotent on trade identity
 - [ ] WAL shipping to a passive follower
 - [ ] Tracing (OpenTelemetry) + metrics (Prometheus)
 
@@ -110,6 +110,101 @@ it the WAL benchmarks write to `$TMPDIR`, which on most Linux desktops is a
 tmpfs, where fsync is nearly free and the result measures encoding overhead
 rather than durability.
 
+## Running it
+
+```sh
+createdb dhukuti_oms
+make serve                    # or: go run ./cmd/server -h  for the flags
+
+# a node you can actually trade against
+go run ./cmd/server \
+  -addr 127.0.0.1:9090 \
+  -wal ./data/wal \
+  -db postgres:///dhukuti_oms \
+  -seed-accounts 8
+```
+
+`-seed-accounts` funds demo accounts (`acct-0`…) so a fresh node can be traded
+against; it is development-only, and the server says so in its logs. Starting
+without `-wal` or `-db` works and warns loudly about what is not durable.
+
+gRPC reflection is on, so `grpcurl` needs no `.proto`:
+
+```sh
+grpcurl -plaintext localhost:9090 list
+grpcurl -plaintext -d '{"symbol":"NABIL","account_id":"acct-0","side":"SIDE_SELL","type":"ORDER_TYPE_LIMIT","price":500,"quantity":100}' \
+  localhost:9090 dhukuti.oms.v1.OrderService/PlaceOrder
+grpcurl -plaintext -d '{"symbol":"NABIL"}' localhost:9090 dhukuti.oms.v1.OrderService/StreamTrades
+```
+
+`make proto` regenerates the stubs. The plugin versions come from the `tool`
+directives in `go.mod` rather than from `$PATH`, so it reproduces anywhere and
+does not disturb a globally installed `protoc-gen-go`.
+
+## gRPC API
+
+[`internal/api`](internal/api) validates what arrives off the network, routes to
+the sequencer that owns the symbol, and settles.
+
+- `PlaceOrder` — synchronous: returns once the order is durable and matched,
+  carrying every trade it produced. **Order IDs are assigned by the venue**, not
+  the client: they are sequential, so a client-chosen ID could name an order
+  another account holds.
+- `CancelOrder` — checks that the requesting account actually placed the order.
+  Guessing a sequential ID is trivial, so without that check any client could
+  cancel anyone's orders. The account claim is *not authenticated* in v1 (auth is
+  out of scope) — the check is built so that adding auth later makes it real
+  without changing this logic.
+- `StreamTrades` — live feed from the moment of subscription, published from
+  inside the sequencer goroutine so trades cannot arrive out of match order. A
+  subscriber that falls behind loses trades rather than stalling the matcher.
+
+Symbols are a trust boundary: a symbol becomes a directory name under the WAL
+root, so it is checked against an allowlist (`A-Z0-9`, ≤12 chars) and the number
+of lazily created symbols is capped. See
+[ADR-005](docs/adr/0005-multi-symbol-partitioning.md).
+
+## Multi-symbol
+
+[`oms.Registry`](internal/oms/registry.go) maps a symbol to the one sequencer
+that owns its book, creating it — and replaying its log — on first use. Each
+symbol gets its own goroutine, book, log directory, and log-position / trade-ID
+sequences, so unrelated instruments never contend.
+
+## Settlement
+
+[`internal/ledger`](internal/ledger) posts double-entry rows to Postgres: one
+trade writes four legs (buyer debits shares and credits cash, seller the
+reverse), and for any `(symbol, trade_id, asset)` the debits equal the credits.
+
+Settlement is **idempotent by construction** — a unique index over a trade's legs
+plus `ON CONFLICT DO NOTHING` — rather than by checking first, because
+check-then-insert is a race. It has to be idempotent: replay re-derives trades
+from the log, so the same trade can be presented twice.
+
+See [ADR-004](docs/adr/0004-synchronous-settlement.md), including the self-trade
+bug a load test found in the original idempotency key, and the two known gaps
+(the pre-trade check is not atomic with the order; a MARKET buy's cost cannot be
+bounded without circuit limits).
+
+```sh
+OMS_TEST_DATABASE_URL=postgres:///dhukuti_oms_test go test ./internal/ledger/
+```
+
+Ledger tests skip without that variable, since CI needs to build without a
+database — CI supplies one via a service container so the skip does not become
+permanent.
+
+## Load testing
+
+```sh
+go run ./cmd/loadgen -addr 127.0.0.1:9090 -workers 64 -duration 30s -accounts 8
+```
+
+[`cmd/loadgen`](cmd/loadgen) is a real gRPC client rather than `hey`/`vegeta`
+(HTTP-only) or `ghz` (another dependency): it drives the generated stubs over a
+real connection and reports throughput plus p50/p95/p99/p99.9.
+
 ## Design decisions
 
 Each non-obvious architectural choice is written up as an ADR before or
@@ -118,6 +213,8 @@ alongside the code that implements it:
 - [ADR-001: L3 order book as a price-indexed map of FIFO queues](docs/adr/0001-order-book-data-structure.md)
 - [ADR-002: Single-writer goroutine per symbol, channel-fed](docs/adr/0002-single-writer-sequencer.md)
 - [ADR-003: WAL with group-commit fsync and deterministic replay](docs/adr/0003-wal-design.md)
+- [ADR-004: Synchronous in-process settlement, idempotent on trade identity](docs/adr/0004-synchronous-settlement.md)
+- [ADR-005: Multi-symbol partitioning via a per-symbol sequencer registry](docs/adr/0005-multi-symbol-partitioning.md)
 
 More land as the corresponding subsystem is built (WAL, settlement,
 multi-symbol partitioning, replication).

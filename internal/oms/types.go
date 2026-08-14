@@ -57,7 +57,29 @@ type Trade struct {
 	MakerAccID string
 	TakerAccID string
 	Quantity   int64
-	TimeStamp  time.Time // metric only, not used in matching
+	// TakerSide is the incoming order's direction, and it is what tells
+	// settlement who bought: if TakerSide is Buy the taker pays cash and
+	// receives shares, otherwise the maker does. Without it a Trade names both
+	// parties but not which way the value moved.
+	TakerSide OrderSide
+	TimeStamp time.Time // metric only, not used in matching
+}
+
+// Buyer returns the account that receives shares and pays cash, and Seller the
+// account on the other end.
+func (t Trade) Buyer() string {
+	if t.TakerSide == Buy {
+		return t.TakerAccID
+	}
+	return t.MakerAccID
+}
+
+// Seller returns the account that delivers shares and receives cash.
+func (t Trade) Seller() string {
+	if t.TakerSide == Buy {
+		return t.MakerAccID
+	}
+	return t.TakerAccID
 }
 
 // Order is a request to buy or sell Quantity shares of Symbol, either at a
