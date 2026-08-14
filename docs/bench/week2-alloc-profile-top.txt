@@ -1,0 +1,21 @@
+File: oms.test
+Build ID: 1c5567a1aa6904ba5ec83bbed68f9ed43c7c9c00
+Type: alloc_objects
+Time: 2026-08-14 16:37:56 +0545
+Showing nodes accounting for 1964250, 99.73% of 1969629 total
+Dropped 48 nodes (cum <= 9848)
+      flat  flat%   sum%        cum   cum%
+    803675 40.80% 40.80%     803675 40.80%  github.com/Poudel0/OMS/internal/oms.(*Sequencer).Submit
+    284000 14.42% 55.22%     284000 14.42%  container/list.(*List).insertValue (inline)
+    196626  9.98% 65.21%     371396 18.86%  github.com/Poudel0/OMS/internal/oms.(*priceLevel).push (inline)
+    174766  8.87% 74.08%     283997 14.42%  github.com/Poudel0/OMS/internal/oms.(*Book).getOrCreateLevel
+    163854  8.32% 82.40%     273084 13.86%  github.com/Poudel0/OMS/internal/oms.(*priceLevel).pushFront (inline)
+    126269  6.41% 88.81%     257349 13.07%  github.com/Poudel0/OMS/internal/oms.(*Book).matchAgainstBids
+    109231  5.55% 94.35%     109231  5.55%  container/list.New (inline)
+    105712  5.37% 99.72%     247716 12.58%  github.com/Poudel0/OMS/internal/oms.(*Book).matchAgainstAsks
+       117 0.0059% 99.73%    1160575 58.92%  github.com/Poudel0/OMS/internal/oms.(*Book).Submit
+         0     0% 99.73%     174770  8.87%  container/list.(*List).PushBack (inline)
+         0     0% 99.73%     109230  5.55%  container/list.(*List).PushFront (inline)
+         0     0% 99.73%    1160575 58.92%  github.com/Poudel0/OMS/internal/oms.(*Sequencer).run
+         0     0% 99.73%     803675 40.80%  github.com/Poudel0/OMS/internal/oms.benchmarkSequencer.func1
+         0     0% 99.73%     803675 40.80%  github.com/Poudel0/OMS/internal/oms.runConcurrent.func1
