@@ -13,8 +13,13 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
+	"go.opentelemetry.io/otel/attribute"
+	otelcodes "go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
+
 	"github.com/Poudel0/OMS/internal/oms"
 	"github.com/Poudel0/OMS/internal/pb"
+	"github.com/Poudel0/OMS/internal/tracing"
 )
 
 // Limits on what the network may ask for. These are not tuning parameters:
@@ -49,6 +54,19 @@ type Ledger interface {
 	Settle(ctx context.Context, trades []oms.Trade) error
 }
 
+// Observer receives request-path measurements. It is an interface so that this
+// package does not import the metrics package, which already imports oms — and
+// so a test can assert on what was recorded without a Prometheus registry.
+//
+// A nil Observer disables measurement entirely, which is what tests and
+// benchmarks want.
+type Observer interface {
+	ObserveOrder(symbol, side, orderType, outcome string, trades int, d time.Duration)
+	ObserveCancel(symbol, outcome string)
+	ObserveSettlement(outcome string, d time.Duration)
+	ObserveFeedDrop(symbol string)
+}
+
 // Server implements the OrderService gRPC API over a symbol registry.
 type Server struct {
 	pb.UnimplementedOrderServiceServer
@@ -57,6 +75,7 @@ type Server struct {
 	accounts *oms.Accounts
 	ledger   Ledger
 	log      *slog.Logger
+	obs      Observer
 
 	mu    sync.Mutex
 	feeds map[string]*tradeFeed
@@ -68,6 +87,12 @@ type Server struct {
 // It installs itself as the registry's trade callback, so the registry must not
 // have been used yet.
 func NewServer(reg *oms.Registry, accounts *oms.Accounts, ledger Ledger, log *slog.Logger) *Server {
+	return NewServerWithObserver(reg, accounts, ledger, log, nil)
+}
+
+// NewServerWithObserver is NewServer plus request-path measurement. obs may be
+// nil.
+func NewServerWithObserver(reg *oms.Registry, accounts *oms.Accounts, ledger Ledger, log *slog.Logger, obs Observer) *Server {
 	if log == nil {
 		log = slog.Default()
 	}
@@ -76,6 +101,7 @@ func NewServer(reg *oms.Registry, accounts *oms.Accounts, ledger Ledger, log *sl
 		accounts: accounts,
 		ledger:   ledger,
 		log:      log,
+		obs:      obs,
 		feeds:    make(map[string]*tradeFeed),
 	}
 	reg.OnTrades = s.onTrades
@@ -95,12 +121,73 @@ func (s *Server) onTrades(symbol string, trades []oms.Trade) {
 	s.feed(symbol).publish(symbol, trades)
 }
 
+func (s *Server) observeOrder(req *pb.PlaceOrderRequest, outcome string, trades int, started time.Time) {
+	if s.obs == nil {
+		return
+	}
+	s.obs.ObserveOrder(req.GetSymbol(), req.GetSide().String(), req.GetType().String(), outcome, trades, time.Since(started))
+}
+
+func (s *Server) observeCancel(symbol, outcome string) {
+	if s.obs != nil {
+		s.obs.ObserveCancel(symbol, outcome)
+	}
+}
+
+func (s *Server) observeSettlement(err error, d time.Duration) {
+	if s.obs == nil {
+		return
+	}
+	outcome := "ok"
+	if err != nil {
+		outcome = "failed"
+	}
+	s.obs.ObserveSettlement(outcome, d)
+}
+
+// submitOutcome names why an order was refused, for the metric label. The labels
+// are a small closed set on purpose: an unbounded label value (an error string,
+// say) would create a new time series per distinct failure and eventually take
+// the monitoring system down with it.
+func submitOutcome(err error) string {
+	switch {
+	case errors.Is(err, oms.ErrInsufficientFunds):
+		return "insufficient_funds"
+	case errors.Is(err, oms.ErrInsufficientShares):
+		return "insufficient_shares"
+	case errors.Is(err, oms.ErrUnknownAccount):
+		return "unknown_account"
+	case errors.Is(err, oms.ErrSequencerClosed):
+		return "shutting_down"
+	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
+		return "client_gone"
+	default:
+		return "error"
+	}
+}
+
+func cancelOutcome(err error) string {
+	switch {
+	case errors.Is(err, oms.ErrNotOrderOwner):
+		return "not_owner"
+	case errors.Is(err, oms.ErrSequencerClosed):
+		return "shutting_down"
+	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
+		return "client_gone"
+	default:
+		return "not_found"
+	}
+}
+
 func (s *Server) feed(symbol string) *tradeFeed {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	f, ok := s.feeds[symbol]
 	if !ok {
 		f = newTradeFeed()
+		if s.obs != nil {
+			f.onDrop = func() { s.obs.ObserveFeedDrop(symbol) }
+		}
 		s.feeds[symbol] = f
 	}
 	return f
@@ -109,13 +196,18 @@ func (s *Server) feed(symbol string) *tradeFeed {
 // PlaceOrder validates, checks affordability, routes to the symbol's sequencer,
 // and settles.
 func (s *Server) PlaceOrder(ctx context.Context, req *pb.PlaceOrderRequest) (*pb.PlaceOrderResponse, error) {
+	started := time.Now()
 	order, err := orderFromRequest(req)
 	if err != nil {
+		// Recorded under the symbol as sent: a flood of rejects for one bogus
+		// symbol is exactly the shape worth being able to see.
+		s.observeOrder(req, "invalid", 0, started)
 		return nil, err
 	}
 
 	seq, err := s.reg.Get(req.GetSymbol())
 	if err != nil {
+		s.observeOrder(req, "unavailable", 0, started)
 		return nil, registryError(err)
 	}
 
@@ -126,10 +218,30 @@ func (s *Server) PlaceOrder(ctx context.Context, req *pb.PlaceOrderRequest) (*pb
 	// sequencer does an atomic check-and-reserve against
 	// `owned - already committed`, before the order is logged — see
 	// oms.Accounts. Its rejection arrives here as a Submit error.
-	resp, err := seq.Submit(ctx, order)
+	submitCtx, submitSpan := tracing.Tracer().Start(ctx, "sequencer.submit",
+		trace.WithAttributes(
+			attribute.String("oms.symbol", order.Symbol),
+			attribute.String("oms.side", req.GetSide().String()),
+			attribute.String("oms.type", req.GetType().String()),
+			attribute.Int64("oms.quantity", order.Quantity),
+		))
+	resp, err := seq.Submit(submitCtx, order)
 	if err != nil {
+		submitSpan.SetStatus(otelcodes.Error, submitOutcome(err))
+		submitSpan.End()
+		s.observeOrder(req, submitOutcome(err), 0, started)
 		return nil, submitError(err)
 	}
+	// The span covers queueing, the group commit's fsync, and matching, as seen
+	// by the caller. The commit itself is not a child span: one commit serves many
+	// requests, so it belongs to many traces at once — see the tracing package.
+	submitSpan.SetAttributes(
+		attribute.Int64("oms.order_id", int64(resp.OrderID)),
+		attribute.Int64("oms.log_position", resp.Seq),
+		attribute.Int("oms.trades", len(resp.Trades)),
+		attribute.Int64("oms.queue_latency_us", resp.QueueLatency.Microseconds()),
+	)
+	submitSpan.End()
 
 	// Durable settlement happens off the matcher's critical path, unlike the
 	// in-memory balance update in onTrades. The trade is already durable in the
@@ -148,13 +260,24 @@ func (s *Server) PlaceOrder(ctx context.Context, req *pb.PlaceOrderRequest) (*pb
 	if s.ledger != nil && len(resp.Trades) > 0 {
 		settleCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), settleTimeout)
 		defer cancel()
-		if err := s.ledger.Settle(settleCtx, resp.Trades); err != nil {
+		settleStart := time.Now()
+		settleCtx, settleSpan := tracing.Tracer().Start(settleCtx, "ledger.settle",
+			trace.WithAttributes(attribute.Int("oms.trades", len(resp.Trades))))
+		err := s.ledger.Settle(settleCtx, resp.Trades)
+		if err != nil {
+			settleSpan.SetStatus(otelcodes.Error, "settlement failed")
+		}
+		settleSpan.End()
+		s.observeSettlement(err, time.Since(settleStart))
+		if err != nil {
 			s.log.ErrorContext(ctx, "settlement failed; trades are durable but unsettled",
 				"symbol", req.GetSymbol(), "order_id", resp.OrderID, "trades", len(resp.Trades), "err", err)
+			s.observeOrder(req, "unsettled", len(resp.Trades), started)
 			return nil, status.Errorf(codes.Internal, "settlement failed for order %d", resp.OrderID)
 		}
 	}
 
+	s.observeOrder(req, "accepted", len(resp.Trades), started)
 	return &pb.PlaceOrderResponse{
 		OrderId:               int64(resp.OrderID),
 		LogPosition:           resp.Seq,
@@ -205,8 +328,10 @@ func (s *Server) CancelOrder(ctx context.Context, req *pb.CancelOrderRequest) (*
 
 	pos, err := seq.CancelFor(ctx, oms.SeqID(req.GetOrderId()), account)
 	if err != nil {
+		s.observeCancel(req.GetSymbol(), cancelOutcome(err))
 		return nil, cancelError(err)
 	}
+	s.observeCancel(req.GetSymbol(), "cancelled")
 	return &pb.CancelOrderResponse{LogPosition: pos}, nil
 }
 

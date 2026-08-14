@@ -18,13 +18,22 @@ const feedBuffer = 256
 // means publish must never block, because blocking here stops the symbol from
 // matching at all.
 //
-// ponytail: a subscriber whose buffer is full silently loses trades rather
-// than applying backpressure. That is the correct trade for a live market-data
-// feed — one slow client must not be able to halt the venue — but "silently"
-// is the part to fix first: a real deployment wants the subscriber
-// disconnected and told, and a dropped-trades counter on /metrics (Week 6).
-// StreamTrades makes no completeness guarantee, and its proto comment says so.
+// A subscriber whose buffer is full loses trades rather than applying
+// backpressure. That is the correct trade for a live market-data feed — one slow
+// client must not be able to halt the venue — and it is no longer silent: every
+// drop increments oms_trade_feed_dropped_total. StreamTrades makes no
+// completeness guarantee, and its proto comment says so.
+//
+// ponytail: still not *disconnected*. A subscriber that is permanently behind
+// keeps its slot and keeps losing trades, where a real venue would cut it off and
+// make it resubscribe. The counter is what makes that decision possible; making
+// it automatically is the next step.
 type tradeFeed struct {
+	// onDrop, if set, is called once per subscriber that could not keep up. It is
+	// what turns "drops silently" into "drops, and says so" — see
+	// metrics.ObserveFeedDrop.
+	onDrop func()
+
 	mu     sync.Mutex
 	subs   map[int64]chan *tradeBatch
 	nextID int64
@@ -69,7 +78,11 @@ func (f *tradeFeed) publish(symbol string, trades []oms.Trade) {
 	for _, ch := range f.subs {
 		select {
 		case ch <- batch:
-		default: // subscriber is behind; drop rather than stall the matcher
+		default:
+			// Subscriber is behind; drop rather than stall the matcher.
+			if f.onDrop != nil {
+				f.onDrop()
+			}
 		}
 	}
 }

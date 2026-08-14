@@ -18,34 +18,78 @@ before the next one starts. Current state:
 - [x] gRPC API (PlaceOrder / CancelOrder / StreamTrades)
 - [x] Postgres double-entry settlement, idempotent on trade identity
 - [x] WAL shipping to a passive follower, manual failover
-- [ ] Tracing (OpenTelemetry) + metrics (Prometheus)
+- [x] Tracing (OpenTelemetry → Jaeger) + metrics (Prometheus)
 
 See [`docs/adr/`](docs/adr/) for the design decisions behind each piece as
 they land, and [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md) for measured
 numbers — nothing in that file is a target, only what was actually measured.
 
+**Headline, measured:** 1,383 orders/sec sustained over 60s, p50 38.7ms, p99
+130ms — durable, settled double-entry, and replicated to a live follower, on one
+laptop. Every number in this README is measured; see
+[`docs/BENCHMARKS.md`](docs/BENCHMARKS.md) for conditions and the ones that
+disappointed.
+
 ## Architecture
 
 ```
-Client
-  |  PlaceOrder / CancelOrder / StreamTrades (gRPC)
-  v
-[gRPC handler] -- inline balance check
-  |  routes to per-symbol sequencer via registry
-  v
-[Sequencer per symbol] -- single goroutine, monotonic SeqID, WAL append+fsync
-  |  channel-fed; reply channel returns trades to caller
-  v
-[Order Book per symbol] -- L3, price-time priority, in-memory
-  |  emits []Trade
-  v
-[Settlement] -- synchronous function call, posts double-entry journal to Postgres
-  v
-[Postgres Ledger] -- idempotent on trade ID
+                    ┌──────────────────────────────────────────────┐
+   gRPC clients ───▶│ OrderService                                 │
+                    │  PlaceOrder · CancelOrder                    │
+                    │  StreamTrades · GetBookSnapshot              │
+                    └───────────────────┬──────────────────────────┘
+                                        │ validate at the trust boundary
+                                        │ (symbol allowlist, caps, venue-assigned order IDs)
+                                        ▼
+                            ┌───────────────────────┐
+                            │ Registry              │  symbol → the one
+                            │  lazy, capped         │  sequencer that owns it
+                            └───────┬───────────────┘
+              ┌─────────────────────┼─────────────────────┐
+              ▼                     ▼                     ▼
+     ┌─────────────────┐   ┌─────────────────┐   ┌─────────────────┐
+     │ Sequencer NABIL │   │ Sequencer ADBL  │   │ Sequencer …     │
+     │ ONE goroutine   │   │ ONE goroutine   │   │                 │
+     │                 │   │                 │   │  per symbol:    │
+     │ 1 reserve  ─────┼───┼──▶ Accounts     │   │  · goroutine    │
+     │ 2 WAL append    │   │   (atomic       │   │  · book         │
+     │ 3 ONE fsync ────┼───┼──▶ WAL segments │   │  · log          │
+     │ 4 match         │   │                 │   │  · id sequences │
+     │ 5 settle+release│   │                 │   │                 │
+     └────────┬────────┘   └─────────────────┘   └─────────────────┘
+              │ []Trade
+              ├──────────────▶ trade feed  ──▶ StreamTrades subscribers
+              │                (in match order; drops for slow ones, and counts it)
+              ▼
+     ┌─────────────────────┐        ┌──────────────────────────┐
+     │ Ledger (Postgres)   │───────▶│ journal_entries          │
+     │ 4 legs, 1 tx        │        │ unique(symbol,trade_id,  │
+     │ idempotent          │        │        account,asset,dir)│
+     └─────────────────────┘        └──────────────────────────┘
 
-Parallel: [WAL Shipper] -- streams WAL records to a follower node (gRPC server-stream)
-Follower replays the WAL to maintain hot-standby book state.
+     WAL segments on disk ──▶ Tailer ──▶ ReplicationService.StreamWAL
+                                                    │  (reads FILES, so a follower
+                                                    │   can never backpressure matching)
+                                                    ▼
+                                        ┌────────────────────────┐
+                                        │ Follower               │
+                                        │ own books + own log,   │
+                                        │ primary's positions    │
+                                        │ ⇒ promotion is just    │
+                                        │   `omsd -wal <dir>`    │
+                                        └────────────────────────┘
 ```
+
+The order of steps 1–5 inside the sequencer is the whole design:
+
+1. **Reserve** — atomic check against `owned − already committed`, *before* the
+   log, so a rejected order never enters it.
+2. **Append** and **3. fsync once per batch** — group commit. Nothing is
+   acknowledged that is not already recoverable.
+4. **Match** — only after durability. An fsync failure rejects the batch and
+   never touches the book.
+5. **Settle and release** — value movement and reservation reconciliation in one
+   atomic step.
 
 ## Order book
 
@@ -228,6 +272,43 @@ loses those N acknowledged orders — `ReplicationStatus` is how you see how wid
 that window currently is. The procedure, and the reconciliation step promotion
 does *not* do for you, are in [`docs/failover.md`](docs/failover.md).
 
+## Observability
+
+```sh
+docker compose up -d          # Jaeger, Prometheus, Postgres
+go run ./cmd/server -otlp localhost:4317 -trace-ratio 1.0 -seed-accounts 8
+
+curl localhost:9091/metrics   # Prometheus
+open http://localhost:16686   # Jaeger
+open http://localhost:9090    # Prometheus UI
+```
+
+Metrics split by how they are best obtained: counters and histograms on the
+request path, and everything derivable from live state — book depth, log
+position, replication lag, group-commit counters — computed **at scrape time** by
+a custom collector. No background goroutine, and no gauge that can drift out of
+sync with the thing it describes.
+
+The one worth knowing about:
+
+```promql
+rate(oms_group_commit_requests_total[1m]) / rate(oms_group_commits_total[1m])
+```
+
+That is mean orders-per-fsync — the number [ADR-003](docs/adr/0003-wal-design.md)'s
+entire argument rests on, live instead of only in a microbenchmark. It measured
+**6.91** during the final 60s run. `oms_replication_follower_seen` is the other
+one: "0 records behind" and "nobody is watching" are the same number and very
+different situations.
+
+Traces cover the gRPC handler → `sequencer.submit` → `ledger.settle` chain. The
+**group commit is deliberately not a span**: one commit serves many concurrent
+requests, so it belongs to many traces at once, and a span has one parent.
+Attaching it to one arbitrary trace would misattribute the whole cost to one
+request. Tracing and batching are in genuine tension, and the batch is measured
+as a metric instead — where a fan-in fits naturally. See
+[`internal/tracing`](internal/tracing/tracing.go).
+
 ## Load testing
 
 ```sh
@@ -252,6 +333,10 @@ alongside the code that implements it:
 
 More land as the corresponding subsystem is built (WAL, settlement,
 multi-symbol partitioning, replication).
+
+**Start here:** [`docs/architecture.md`](docs/architecture.md) — the full writeup,
+built around the four times a measurement contradicted the design reasoning that
+produced it.
 
 ## What this deliberately does not build
 

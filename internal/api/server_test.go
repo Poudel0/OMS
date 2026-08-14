@@ -498,6 +498,12 @@ func TestPlaceOrder_SettlementFailureIsReportedNotSwallowed(t *testing.T) {
 type gateLedger struct {
 	entered chan struct{}
 	release chan struct{}
+	// finished is closed once Settle has recorded its result. The test must wait
+	// on THIS, not on the client call: cancelling the context makes gRPC return
+	// client-side immediately while the server handler is still inside Settle, so
+	// waiting on the client would race the very thing being asserted. That is
+	// exactly how this test passed while proving nothing until -race exposed it.
+	finished chan struct{}
 
 	mu           sync.Mutex
 	errOnRelease error
@@ -505,7 +511,11 @@ type gateLedger struct {
 }
 
 func newGateLedger() *gateLedger {
-	return &gateLedger{entered: make(chan struct{}, 1), release: make(chan struct{})}
+	return &gateLedger{
+		entered:  make(chan struct{}, 1),
+		release:  make(chan struct{}),
+		finished: make(chan struct{}),
+	}
 }
 
 func (l *gateLedger) Settle(ctx context.Context, trades []oms.Trade) error {
@@ -513,9 +523,10 @@ func (l *gateLedger) Settle(ctx context.Context, trades []oms.Trade) error {
 	<-l.release // the test cancels the client's context while we sit here
 
 	l.mu.Lock()
-	defer l.mu.Unlock()
 	l.errOnRelease = ctx.Err()
 	l.settled += len(trades)
+	l.mu.Unlock()
+	close(l.finished)
 	return nil
 }
 
@@ -551,7 +562,14 @@ func TestPlaceOrder_SettlementSurvivesClientCancellation(t *testing.T) {
 	}
 	cancel()
 	close(ledger.release)
-	wg.Wait()
+	wg.Wait() // the client call returns as soon as ctx is cancelled
+
+	// The server handler outlives that, so wait for settlement itself to finish.
+	select {
+	case <-ledger.finished:
+	case <-time.After(10 * time.Second):
+		t.Fatal("settlement never completed after the client hung up")
+	}
 
 	ledger.mu.Lock()
 	defer ledger.mu.Unlock()

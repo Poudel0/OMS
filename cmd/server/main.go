@@ -10,19 +10,23 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"strings"
 	"syscall"
 	"time"
 
+	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/reflection"
 
 	"github.com/Poudel0/OMS/internal/api"
 	"github.com/Poudel0/OMS/internal/ledger"
+	"github.com/Poudel0/OMS/internal/metrics"
 	"github.com/Poudel0/OMS/internal/oms"
 	"github.com/Poudel0/OMS/internal/pb"
+	"github.com/Poudel0/OMS/internal/tracing"
 )
 
 func main() {
@@ -40,6 +44,10 @@ func run() error {
 		seed        = flag.Int("seed-accounts", 0, "development only: create N funded demo accounts (acct-0..acct-N-1)")
 		seedSymbols = flag.String("seed-symbols", "NABIL,ADBL,HBL,NRIC", "symbols to give seeded accounts a position in")
 		shutdownIn  = flag.Duration("shutdown-timeout", 15*time.Second, "how long to let in-flight RPCs finish before forcing the server down")
+		metricsAddr = flag.String("metrics-addr", ":9091", "address for the Prometheus /metrics endpoint; empty disables it")
+		otlpAddr    = flag.String("otlp", os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"), "OTLP collector host:port for traces; empty disables tracing")
+		otlpEnv     = flag.String("environment", "dev", "deployment.environment attribute on exported traces")
+		traceRatio  = flag.Float64("trace-ratio", 0.05, "head-sampling fraction for traces; 1.0 traces everything")
 	)
 	flag.Parse()
 
@@ -72,6 +80,24 @@ func run() error {
 		log.Warn("running without a settlement ledger: trades will match but nothing will be journalled")
 	}
 
+	// Tracing is opt-in: with no endpoint, OTel's default provider is a no-op and
+	// every span in the codebase costs essentially nothing. A node should not
+	// refuse to start because a collector is down.
+	shutdownTracing, err := tracing.Setup(ctx, *otlpAddr, *otlpEnv, *traceRatio)
+	if err != nil {
+		return fmt.Errorf("set up tracing: %w", err)
+	}
+	defer func() {
+		shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := shutdownTracing(shutCtx); err != nil {
+			log.Warn("flushing traces on shutdown", "err", err)
+		}
+	}()
+	if *otlpAddr != "" {
+		log.Info("tracing enabled", "otlp", *otlpAddr, "sample_ratio", *traceRatio)
+	}
+
 	accounts := oms.NewAccounts()
 
 	// Rebuild balances from the journal before anything can trade. The in-memory
@@ -95,18 +121,56 @@ func run() error {
 	}
 
 	reg := oms.NewRegistry(ctx, *walDir, accounts)
-	srv := api.NewServer(reg, accounts, settle, log)
 
-	gs := grpc.NewServer()
-	pb.RegisterOrderServiceServer(gs, srv)
-
-	// Replication is served from the same listener for now. A real deployment
-	// would put it on its own port with its own credentials: a follower is not a
-	// client, and the log is strictly more sensitive than the order API.
+	// Replication is served from the same gRPC listener for now. A real
+	// deployment would put it on its own port with its own credentials: a
+	// follower is not a client, and the log is strictly more sensitive than the
+	// order API.
+	var repl *api.ReplicationServer
 	if *walDir != "" {
-		pb.RegisterReplicationServiceServer(gs, api.NewReplicationServer(*walDir, reg, log))
+		repl = api.NewReplicationServer(*walDir, reg, log)
 	} else {
 		log.Warn("replication disabled: a node with no write-ahead log has nothing to ship")
+	}
+
+	// The metrics collector reads replication lag from the same code path that
+	// serves ReplicationStatus, so the gRPC view and the Prometheus view cannot
+	// disagree about what lag means.
+	var lagSource metrics.LagSource
+	if repl != nil {
+		lagSource = repl
+	}
+	met := metrics.New(reg, lagSource)
+	srv := api.NewServerWithObserver(reg, accounts, settle, log, met)
+
+	// The interceptor starts a span per RPC and continues one the client sent,
+	// which is what makes the handler->sequencer->settlement chain a single trace
+	// rather than three unrelated ones.
+	gs := grpc.NewServer(grpc.StatsHandler(otelgrpc.NewServerHandler()))
+	pb.RegisterOrderServiceServer(gs, srv)
+	if repl != nil {
+		pb.RegisterReplicationServiceServer(gs, repl)
+	}
+
+	var metricsSrv *http.Server
+	if *metricsAddr != "" {
+		mux := http.NewServeMux()
+		mux.Handle("/metrics", met.Handler())
+		// A liveness probe that does not touch the book: if the process answers,
+		// the process is up. Readiness would need to mean "logs open and
+		// recovered", which is a different question and not one a load balancer
+		// should be guessing at.
+		mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("ok\n"))
+		})
+		metricsSrv = &http.Server{Addr: *metricsAddr, Handler: mux, ReadHeaderTimeout: 5 * time.Second}
+		go func() {
+			if err := metricsSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				log.Error("metrics endpoint failed", "err", err)
+			}
+		}()
+		log.Info("metrics listening", "addr", *metricsAddr, "path", "/metrics")
 	}
 	// Reflection lets grpcurl explore the API without a copy of the .proto.
 	// Fine for a single-tenant venue you operate yourself; a public deployment
@@ -145,6 +209,14 @@ func run() error {
 	case <-time.After(*shutdownIn):
 		log.Warn("in-flight RPCs did not finish in time; forcing shutdown", "timeout", *shutdownIn)
 		gs.Stop()
+	}
+
+	if metricsSrv != nil {
+		shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		if err := metricsSrv.Shutdown(shutCtx); err != nil {
+			log.Warn("metrics endpoint did not shut down cleanly", "err", err)
+		}
+		cancel()
 	}
 
 	// Close flushes and fsyncs every symbol's log, and reports if that failed —

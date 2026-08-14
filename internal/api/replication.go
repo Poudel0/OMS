@@ -11,6 +11,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
+	"github.com/Poudel0/OMS/internal/metrics"
 	"github.com/Poudel0/OMS/internal/oms"
 	"github.com/Poudel0/OMS/internal/pb"
 )
@@ -204,6 +205,26 @@ func (s *ReplicationServer) primaryPosition(symbol string) (int64, error) {
 		return 0, err
 	}
 	return w, nil
+}
+
+// SymbolLag reports per-symbol replication lag for the metrics collector. It is
+// the same data ReplicationStatus serves, in the shape metrics.LagSource wants,
+// so the gRPC view and the Prometheus view cannot disagree about what lag means.
+func (s *ReplicationServer) SymbolLag() map[string]metrics.FollowerLag {
+	resp, err := s.ReplicationStatus(context.Background(), &pb.ReplicationStatusRequest{})
+	if err != nil {
+		return nil
+	}
+	out := make(map[string]metrics.FollowerLag, len(resp.GetSymbols()))
+	for _, lag := range resp.GetSymbols() {
+		out[lag.GetSymbol()] = metrics.FollowerLag{
+			PrimaryPosition:  lag.GetPrimaryPosition(),
+			FollowerPosition: lag.GetFollowerPosition(),
+			FollowerSeen:     lag.GetFollowerSeen(),
+			MillisBehind:     lag.GetMillisBehind(),
+		}
+	}
+	return out
 }
 
 func recordToPB(rec oms.Record) *pb.WALRecord {

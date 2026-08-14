@@ -1,0 +1,34 @@
+global:
+  # 5s rather than the usual 15s: the interesting metrics here move on the
+  # timescale of a load test, and replication lag is worth seeing promptly.
+  scrape_interval: 5s
+  evaluation_interval: 5s
+
+scrape_configs:
+  - job_name: dhukuti-oms
+    static_configs:
+      # The node runs on the host, not in compose -- it needs a real WAL
+      # directory on real storage. See the comment in docker-compose.yml.
+      - targets: ["host.docker.internal:9091"]
+        labels:
+          role: primary
+
+# Useful queries once this is up:
+#
+#   Mean orders per fsync -- the number ADR-003's whole group-commit argument
+#   rests on, live rather than in a benchmark:
+#     rate(oms_group_commit_requests_total[1m]) / rate(oms_group_commits_total[1m])
+#
+#   Order throughput by outcome, which is how you see rejects as a ratio:
+#     sum by (outcome) (rate(oms_orders_total[1m]))
+#
+#   p99 order latency (includes the group commit's fsync):
+#     histogram_quantile(0.99, sum by (le) (rate(oms_order_duration_seconds_bucket[1m])))
+#
+#   Replication lag. Check follower_seen too: "0 behind" and "nobody is
+#   watching" are the same number and very different situations.
+#     oms_replication_records_behind
+#     oms_replication_follower_seen
+#
+#   Trades lost to slow market-data subscribers:
+#     rate(oms_trade_feed_dropped_total[1m])

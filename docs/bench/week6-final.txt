@@ -1,0 +1,72 @@
+# Week 6 final numbers. Hardware: AMD Ryzen 5 4600H (12 threads), 14 GiB RAM.
+# WAL: btrfs on LUKS-encrypted Samsung MZVLB256HBHQ NVMe, compress=zstd:3.
+# Ledger: Postgres 17 via local socket, same machine. Not an isolated bench box.
+
+## 60s sustained, full stack, follower ATTACHED (both WALs on the same device)
+target        127.0.0.1:19800
+workers       64
+symbols       [NABIL ADBL HBL NRIC]
+wall clock    1m0s
+accepted      82957 orders
+rejected      0
+trades        60763
+throughput    1383 orders/sec
+latency
+  p50         38.658ms
+  p95         99.841ms
+  p99         129.942ms
+  p99.9       301.076ms
+  max         541.095ms
+
+## 60s sustained, same load, NO follower (control)
+target        127.0.0.1:19810
+workers       64
+symbols       [NABIL ADBL HBL NRIC]
+wall clock    1m0.002s
+accepted      88540 orders
+rejected      220
+trades        65114
+throughput    1476 orders/sec
+latency
+  p50         37.258ms
+  p95         97.547ms
+  p99         121.967ms
+  p99.9       230.134ms
+  max         288.672ms
+
+## Cost of the follower: 1476 -> 1383 orders/sec = 6.3%
+# NOT backpressure -- the design makes that impossible (the follower reads log
+# FILES; nothing on the matching path waits for it). It is disk contention: the
+# follower group-commits its OWN log to the SAME device, so it competes for
+# fsync capacity. A follower on its own disk, or on another host, should cost ~0.
+# A naive comparison against the 30s/1973-per-sec Week 4 run would have blamed
+# the follower for 30%; the control shows most of that gap is deeper books over a
+# longer run, not replication.
+
+## Replication lag during the 60s run (records behind, sampled every 5s, 4 symbols)
+     1	150,160,121,157
+     2	319,302,246,358
+     3	422,375,368,494
+     4	504,481,552,77
+     5	184,183,204,292
+     6	191,181,214,9
+     7	66,62,68,145
+     8	166,177,184,63
+     9	117,114,145,191
+    10	24,15,47,103
+    11	197,234,34,93
+    12	0,0,0,0
+# Peaked ~550 records mid-run, ended at 0,0,0,0 with follower_seen=1 for all four.
+# At ~1383 orders/sec across 4 symbols, 550 records is well under a second of
+# exposure -- which is the async replication window a failover would lose.
+
+## Live group-commit ratio at end of run (oms_group_commit_* from /metrics)
+  ADBL 6.92 | HBL 6.89 | NABIL 6.87 | NRIC 6.96 | TOTAL 6.91 orders/fsync
+# ADR-003's mechanism, observable live rather than only in a microbenchmark.
+
+## Cold-start WAL replay (BenchmarkRecover, real storage)
+BenchmarkRecover/records=10000-12         	       3	 102260441 ns/op	     10226 ns/record	     97790 records/sec
+BenchmarkRecover/records=100000-12        	       3	1125031298 ns/op	     11250 ns/record	     88886 records/sec
+# 100k records rebuild a book in ~1.13s (~89k records/sec), near-linear
+# (10,226 -> 11,250 ns/record over a 10x size increase). Nothing prunes the log,
+# so this grows for the life of the node -- see ADR-003 on snapshots.

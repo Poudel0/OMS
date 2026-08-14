@@ -1,0 +1,8 @@
+goos: linux
+goarch: amd64
+pkg: github.com/Poudel0/OMS/internal/oms
+cpu: AMD Ryzen 5 4600H with Radeon Graphics         
+BenchmarkRecover/records=10000-12         	       3	 102260441 ns/op	     10226 ns/record	     97790 records/sec
+BenchmarkRecover/records=100000-12        	       3	1125031298 ns/op	     11250 ns/record	     88886 records/sec
+PASS
+ok  	github.com/Poudel0/OMS/internal/oms	4.253s

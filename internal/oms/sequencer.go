@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -141,8 +142,17 @@ type Sequencer struct {
 	seq         int64
 	nextOrderID SeqID
 	walErr      error
-	commits     int64 // group commits performed
-	batched     int64 // requests those commits covered
+
+	// Live counters. Written only by the sequencer goroutine, but atomically,
+	// so a metrics scrape can read them without a round trip through the request
+	// channel. ADR-003 deferred this as "needs atomics or a report-from-inside
+	// channel"; two atomic adds per group commit is nothing beside the fsync the
+	// same commit pays for, and it is the difference between a live gauge and a
+	// number only available after shutdown.
+	commits atomic.Int64 // group commits performed
+	batched atomic.Int64 // requests those commits covered
+	resting atomic.Int64 // orders currently in the book
+	lastPos atomic.Int64 // highest log position assigned
 
 	// shutdownErr is written before close(done) and only read after a
 	// receive from done, which is what makes that unsynchronized access safe.
@@ -225,8 +235,8 @@ func (s *Sequencer) drain(batch *[]request) {
 // is already recoverable.
 func (s *Sequencer) commit(batch []request) {
 	pickedUpAt := time.Now()
-	s.commits++
-	s.batched += int64(len(batch))
+	s.commits.Add(1)
+	s.batched.Add(int64(len(batch)))
 
 	// Order IDs are assigned before the log is written, never after: the log
 	// has to carry the same ID the caller was told about, or replay would
@@ -322,6 +332,11 @@ func (s *Sequencer) commit(batch []request) {
 		res.respondedAt = time.Now()
 		req.reply <- res
 	}
+
+	// One map-length read per batch rather than per request, inside the
+	// goroutine that owns the book.
+	s.resting.Store(int64(s.book.RestingCount()))
+	s.lastPos.Store(s.seq)
 }
 
 // release drops a submit's reservation. Cancels never hold one of their own.
@@ -474,14 +489,18 @@ func (s *Sequencer) Close() error {
 // how many orders each fsync paid for — the number ADR-003's whole argument
 // rests on.
 //
-// Only call this once the goroutine has exited (after Close, or after a
-// receive from Done). The counters are written without synchronization
-// because the sequencer goroutine is their only writer; waiting for it to
-// finish is what makes reading them safe, and it is why these are not
-// exposed as a live metric.
+// Safe to call at any time, from any goroutine.
 func (s *Sequencer) CommitStats() (commits, requests int64) {
-	return s.commits, s.batched
+	return s.commits.Load(), s.batched.Load()
 }
+
+// RestingOrders reports how many orders are currently in the book, as of the
+// last completed batch. Safe to call at any time; a moment stale by design,
+// which is what a gauge wants.
+func (s *Sequencer) RestingOrders() int64 { return s.resting.Load() }
+
+// LastPosition reports the highest log position assigned, or 0 without a log.
+func (s *Sequencer) LastPosition() int64 { return s.lastPos.Load() }
 
 // Done returns a channel that's closed once the sequencer's goroutine has
 // exited (its context was cancelled, or Close was called). Useful for waiting

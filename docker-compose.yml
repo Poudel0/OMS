@@ -1,0 +1,50 @@
+# Local observability stack for a Dhukuti node: Jaeger for traces, Prometheus
+# for metrics, Postgres for the settlement ledger.
+#
+# The node itself runs on the host, not in here. It wants a real WAL directory on
+# real storage, and a container's overlay filesystem would make every durability
+# number meaningless (see docs/BENCHMARKS.md on why storage is the benchmark).
+#
+#   docker compose up -d
+#   go run ./cmd/server -db postgres://oms:oms@localhost:5433/dhukuti_oms \
+#                       -otlp localhost:4317 -trace-ratio 1.0 -seed-accounts 8
+#
+#   Jaeger UI      http://localhost:16686
+#   Prometheus UI  http://localhost:9090
+#   node metrics   http://localhost:9091/metrics
+
+services:
+  jaeger:
+    image: jaegertracing/all-in-one:1.62.0
+    ports:
+      - "16686:16686" # UI
+      - "4317:4317"   # OTLP/gRPC, what -otlp points at
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./deploy/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    # host.docker.internal lets the container scrape the node running on the
+    # host. On Linux it needs the mapping below; Docker Desktop provides it.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  postgres:
+    image: postgres:17
+    # 5433 on the host, so this does not collide with a Postgres you already run
+    # locally -- which, if you are working on this, you probably do.
+    ports:
+      - "5433:5432"
+    environment:
+      POSTGRES_USER: oms
+      POSTGRES_PASSWORD: oms
+      POSTGRES_DB: dhukuti_oms
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U oms"]
+      interval: 5s
+      timeout: 5s
+      retries: 5

@@ -18,6 +18,11 @@ background load).
 | 4 | **Full stack** end-to-end: gRPC → registry → sequencer → WAL fsync → matcher → Postgres settlement | `cmd/loadgen`, 64 concurrent gRPC clients across 4 symbols, 30s. WAL on btrfs/LUKS/zstd:3 NVMe; Postgres 17 over a local socket on the same machine. Raw: `docs/bench/week4-grpc-loadtest.txt` | **1,973 orders/sec** · p50 28.9ms · p95 55.7ms · p99 71.3ms · p99.9 132.9ms · 47,293 trades, 0 rejected | 2026-08-14 |
 | 4 | Same, **without the ledger** (isolates settlement cost) | Identical load, server started with no `-db` | **3,910 orders/sec** · p50 14.8ms · p95 27.8ms · p99 32.9ms · p99.9 105.5ms | 2026-08-14 |
 | 5 | Failover: primary + follower under load, `kill -9`, manual promotion | Real processes, 16 clients / 8s / 2 symbols. Raw: `docs/bench/week5-failover-demo.txt` | Follower caught up at 0 records behind; promoted node's depth **byte-identical** to the lost primary's at the same log position (1873); accepted new orders at 1874; journal 2,451 trades, 0 imbalanced, net cash 0 | 2026-08-14 |
+| 6 | **FINAL: 60s sustained**, full stack + follower attached | `cmd/loadgen`, 64 clients, 4 symbols, 60s. Primary and follower WALs on the **same** device. Raw: `docs/bench/week6-final.txt` | **1,383 orders/sec** · 82,957 orders · 60,763 trades · p50 38.7ms · p95 99.8ms · p99 129.9ms · p99.9 301.1ms · max 541.1ms | 2026-08-14 |
+| 6 | Same 60s load, **no follower** (control) | Identical, follower not started | **1,476 orders/sec** · p50 37.3ms · p99 122.0ms · p99.9 230.1ms → a follower costs **6.3%** | 2026-08-14 |
+| 6 | **Cold-start WAL replay** | `BenchmarkRecover`, real storage, mixed limit/market/cancel log | 10k records: 102ms (~98k/sec) · **100k records: 1.13s (~89k/sec)** · 10,226 → 11,250 ns/record over a 10× size increase | 2026-08-14 |
+| 6 | Replication lag under sustained load | Sampled every 5s during the 60s run above, 4 symbols | Peaked ~550 records behind mid-run; **ended 0 behind on all four symbols**, `follower_seen=1` | 2026-08-14 |
+| 6 | Live group-commit ratio | `oms_group_commit_*` from `/metrics` at end of the 60s run | **6.91 orders/fsync** (ADBL 6.92 · HBL 6.89 · NABIL 6.87 · NRIC 6.96) | 2026-08-14 |
 
 ## Notes
 
@@ -72,6 +77,41 @@ background load).
 - **The 136k/sec figure is a no-durability number** and must never be quoted
   as venue throughput. The durable numbers are ~294/sec (1 producer) and
   ~12.6k/sec (64). See [ADR-003](adr/0003-wal-design.md).
+
+### Week 6: the number to quote, and what it cost to get honest
+
+**Quote 1,383 orders/sec, p99 130ms.** That is 60 seconds of sustained load
+through the whole system — gRPC in, validated, atomically balance-checked,
+durably logged, matched, journalled double-entry to Postgres, and replicated to
+a live follower. Every other number on this page is a component in isolation.
+
+- **A follower costs 6.3%, and it is not backpressure.** 1,476 → 1,383
+  orders/sec. The design makes backpressure impossible — the follower reads log
+  *files*, so nothing on the matching path waits for it — and the control run
+  confirms the remaining cost is **disk contention**: the follower group-commits
+  its own log to the same device and competes for fsync capacity. On its own disk
+  or another host it should cost ~0.
+
+  Worth noting how easily this could have been reported wrong. Comparing against
+  Week 4's 1,973/sec would have blamed the follower for a 30% drop. Most of that
+  gap is deeper books over a 60s run rather than a 30s one, which only a
+  same-duration control could separate.
+- **100k orders replay in 1.13s** (~89k records/sec), near-linear at
+  10,226 → 11,250 ns/record across a 10× size increase. That is the restart
+  bound, and since nothing prunes the log it grows for the life of the node.
+  Snapshots are the fix (ADR-003); this benchmark is what would prove they were
+  needed.
+- **Replication lag peaked ~550 records and ended at 0.** At ~1,383 orders/sec
+  over 4 symbols that peak is well under a second of exposure — which is exactly
+  the async window a failover would lose (ADR-006).
+- **The group-commit ratio is now observable live: 6.91 orders/fsync.** ADR-003's
+  entire argument rested on that number, previously available only from a
+  microbenchmark. `rate(oms_group_commit_requests_total) /
+  rate(oms_group_commits_total)` gives it over any window.
+- **6.91 orders/fsync at 4 symbols is the ADR-005 finding again.** Week 4's sweep
+  showed durable throughput *falling* as symbols rise, because partitioning
+  divides the batching that durability depends on. 64 clients over 4 symbols
+  means ~16 each, and ~7 orders per fsync follows.
 
 ### Week 5: replication costs the primary nothing measurable
 
