@@ -71,12 +71,13 @@ func validSymbol(s string) bool {
 // single-writer design in ADR-002 was chosen for.
 type Registry struct {
 	// OnTrades, if set, is called with each symbol's trades as they execute,
-	// from inside that symbol's sequencer goroutine. See Sequencer.OnTrades: it
-	// must not block. Set it before the first Get.
+	// from inside that symbol's sequencer goroutine. It runs on the matching
+	// critical path and must not block. Set it before the first Get.
 	OnTrades func(symbol string, trades []Trade)
 
-	ctx    context.Context
-	walDir string
+	ctx      context.Context
+	walDir   string
+	accounts *Accounts
 
 	mu   sync.RWMutex
 	seqs map[string]*Sequencer
@@ -88,8 +89,12 @@ type Registry struct {
 //
 // An empty walDir means no durability at all — useful for tests and for the
 // ADR-002 benchmark configuration, and a footgun anywhere else.
-func NewRegistry(ctx context.Context, walDir string) *Registry {
-	return &Registry{ctx: ctx, walDir: walDir, seqs: make(map[string]*Sequencer)}
+//
+// accounts may be nil, which disables the pre-trade check entirely: orders match
+// with no regard for whether anyone can pay. That is only ever right for tests
+// and benchmarks of the matching path itself.
+func NewRegistry(ctx context.Context, walDir string, accounts *Accounts) *Registry {
+	return &Registry{ctx: ctx, walDir: walDir, accounts: accounts, seqs: make(map[string]*Sequencer)}
 }
 
 // Get returns the sequencer for symbol, creating it — and replaying its log
@@ -134,12 +139,24 @@ func (r *Registry) Get(symbol string) (*Sequencer, error) {
 	return s, nil
 }
 
-// withFeed attaches the registry's trade callback to a freshly created
-// sequencer. It is set here, under the registry's write lock and before the
-// sequencer is published to any caller, so no request can be in flight yet.
-func (r *Registry) withFeed(symbol string, s *Sequencer) *Sequencer {
+// attach wires a freshly created sequencer to its symbol, the shared account
+// store, and the registry's trade callback. Done here, under the registry's
+// write lock and before the sequencer is published to any caller, so no request
+// can be in flight yet.
+func (r *Registry) attach(symbol string, s *Sequencer) *Sequencer {
+	var onTrades func([]Trade)
 	if r.OnTrades != nil {
-		s.OnTrades = func(trades []Trade) { r.OnTrades(symbol, trades) }
+		onTrades = func(trades []Trade) { r.OnTrades(symbol, trades) }
+	}
+	s.attach(symbol, r.accounts, onTrades)
+
+	// A recovered book has live orders whose reservations died with the previous
+	// process. Restore them, or the account's available balance is overstated by
+	// exactly what its own resting orders have already committed.
+	if r.accounts != nil {
+		for _, o := range s.book.RestingOrders() {
+			r.accounts.RestoreHold(symbol, o)
+		}
 	}
 	return s
 }
@@ -147,7 +164,7 @@ func (r *Registry) withFeed(symbol string, s *Sequencer) *Sequencer {
 func (r *Registry) newSequencer(symbol string) (*Sequencer, error) {
 	book := NewBook()
 	if r.walDir == "" {
-		return r.withFeed(symbol, NewSequencer(r.ctx, book)), nil
+		return r.attach(symbol, NewSequencer(r.ctx, book)), nil
 	}
 
 	// validSymbol has already established that symbol cannot escape walDir.
@@ -164,7 +181,7 @@ func (r *Registry) newSequencer(symbol string) (*Sequencer, error) {
 	if err != nil {
 		return nil, fmt.Errorf("oms: open log for symbol %s: %w", symbol, err)
 	}
-	return r.withFeed(symbol, NewSequencerWithWAL(r.ctx, book, w)), nil
+	return r.attach(symbol, NewSequencerWithWAL(r.ctx, book, w)), nil
 }
 
 // Symbols returns the symbols this registry has created, in no particular

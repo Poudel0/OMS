@@ -75,6 +75,12 @@ message PlaceOrderResponse {
   // resting_quantity is what remains in the book. A MARKET order's unfilled
   // remainder is dropped rather than rested, so this is always 0 for MARKET.
   int64 resting_quantity = 4;
+
+  // self_prevented_order_ids lists your own resting orders that were cancelled
+  // because this order would otherwise have traded with your own account. The
+  // venue cancels the resting side rather than printing a wash trade, and says
+  // so here — an order silently vanishing from the book would be worse.
+  repeated int64 self_prevented_order_ids = 5;
 }
 
 message CancelOrderRequest {

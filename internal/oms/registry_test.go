@@ -10,7 +10,7 @@ import (
 )
 
 func TestRegistry_RejectsMalformedSymbols(t *testing.T) {
-	reg := NewRegistry(t.Context(), t.TempDir())
+	reg := NewRegistry(t.Context(), t.TempDir(), nil)
 	defer reg.Close()
 
 	bad := []struct {
@@ -43,7 +43,7 @@ func TestRegistry_RejectsMalformedSymbols(t *testing.T) {
 func TestRegistry_RejectedSymbolCreatesNothingOnDisk(t *testing.T) {
 	root := t.TempDir()
 	walDir := filepath.Join(root, "wal")
-	reg := NewRegistry(t.Context(), walDir)
+	reg := NewRegistry(t.Context(), walDir, nil)
 	defer reg.Close()
 
 	// The decisive check for the traversal guard: a rejected symbol must not
@@ -66,7 +66,7 @@ func TestRegistry_RejectedSymbolCreatesNothingOnDisk(t *testing.T) {
 }
 
 func TestRegistry_AcceptsRealisticSymbols(t *testing.T) {
-	reg := NewRegistry(t.Context(), t.TempDir())
+	reg := NewRegistry(t.Context(), t.TempDir(), nil)
 	defer reg.Close()
 
 	for _, symbol := range []string{"NABIL", "ADBL", "NRIC", "NABILP", "HBL", "UPPER30"} {
@@ -77,7 +77,7 @@ func TestRegistry_AcceptsRealisticSymbols(t *testing.T) {
 }
 
 func TestRegistry_SameSymbolReturnsSameSequencer(t *testing.T) {
-	reg := NewRegistry(t.Context(), t.TempDir())
+	reg := NewRegistry(t.Context(), t.TempDir(), nil)
 	defer reg.Close()
 
 	first, err := reg.Get("NABIL")
@@ -95,7 +95,7 @@ func TestRegistry_SameSymbolReturnsSameSequencer(t *testing.T) {
 
 func TestRegistry_SymbolsAreIsolatedFromEachOther(t *testing.T) {
 	ctx := t.Context()
-	reg := NewRegistry(ctx, t.TempDir())
+	reg := NewRegistry(ctx, t.TempDir(), nil)
 	defer reg.Close()
 
 	nabil, err := reg.Get("NABIL")
@@ -126,7 +126,7 @@ func TestRegistry_SymbolsAreIsolatedFromEachOther(t *testing.T) {
 }
 
 func TestRegistry_ConcurrentGetOfTheSameSymbolCreatesOne(t *testing.T) {
-	reg := NewRegistry(t.Context(), t.TempDir())
+	reg := NewRegistry(t.Context(), t.TempDir(), nil)
 	defer reg.Close()
 
 	// Two callers can both miss the read-locked lookup for a new symbol; the
@@ -159,7 +159,7 @@ func TestRegistry_ConcurrentGetOfTheSameSymbolCreatesOne(t *testing.T) {
 }
 
 func TestRegistry_EnforcesSymbolCap(t *testing.T) {
-	reg := NewRegistry(t.Context(), "") // no WAL: this test is about the cap, not durability
+	reg := NewRegistry(t.Context(), "", nil) // no WAL: this test is about the cap, not durability
 	defer reg.Close()
 
 	for i := range MaxSymbols {
@@ -182,7 +182,7 @@ func TestRegistry_RecoversEachSymbolIndependentlyAcrossRestart(t *testing.T) {
 	ctx := t.Context()
 	dir := t.TempDir()
 
-	reg1 := NewRegistry(ctx, dir)
+	reg1 := NewRegistry(ctx, dir, nil)
 	nabil, err := reg1.Get("NABIL")
 	if err != nil {
 		t.Fatal(err)
@@ -206,7 +206,7 @@ func TestRegistry_RecoversEachSymbolIndependentlyAcrossRestart(t *testing.T) {
 
 	// Restart: a fresh registry over the same directory must rebuild each
 	// symbol's book from that symbol's own log, and resume its positions.
-	reg2 := NewRegistry(ctx, dir)
+	reg2 := NewRegistry(ctx, dir, nil)
 	defer reg2.Close()
 
 	nabil2, err := reg2.Get("NABIL")
@@ -251,7 +251,7 @@ func TestRegistry_RecoversEachSymbolIndependentlyAcrossRestart(t *testing.T) {
 
 func TestRegistry_EachSymbolGetsItsOwnLogDirectory(t *testing.T) {
 	dir := t.TempDir()
-	reg := NewRegistry(t.Context(), dir)
+	reg := NewRegistry(t.Context(), dir, nil)
 	for _, symbol := range []string{"NABIL", "ADBL"} {
 		if _, err := reg.Get(symbol); err != nil {
 			t.Fatal(err)

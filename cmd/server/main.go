@@ -73,11 +73,28 @@ func run() error {
 	}
 
 	accounts := oms.NewAccounts()
+
+	// Rebuild balances from the journal before anything can trade. The in-memory
+	// store is lost on every restart while the journal is not, so this is the
+	// only thing that stops a restarted node from checking orders against
+	// balances of zero. It must happen before the registry replays any log,
+	// because replay restores holds against these balances.
+	if l, ok := settle.(*ledger.Ledger); ok {
+		cash, positions, err := l.Balances(ctx)
+		if err != nil {
+			return fmt.Errorf("rebuild balances from journal: %w", err)
+		}
+		if err := accounts.LoadBalances(cash, positions); err != nil {
+			return fmt.Errorf("load rebuilt balances: %w", err)
+		}
+		log.Info("rebuilt balances from the journal", "accounts", len(cash))
+	}
+
 	if *seed > 0 {
 		seedAccounts(accounts, *seed, *seedSymbols, log)
 	}
 
-	reg := oms.NewRegistry(ctx, *walDir)
+	reg := oms.NewRegistry(ctx, *walDir, accounts)
 	srv := api.NewServer(reg, accounts, settle, log)
 
 	gs := grpc.NewServer()

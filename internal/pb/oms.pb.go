@@ -227,8 +227,13 @@ type PlaceOrderResponse struct {
 	// resting_quantity is what remains in the book. A MARKET order's unfilled
 	// remainder is dropped rather than rested, so this is always 0 for MARKET.
 	RestingQuantity int64 `protobuf:"varint,4,opt,name=resting_quantity,json=restingQuantity,proto3" json:"resting_quantity,omitempty"`
-	unknownFields   protoimpl.UnknownFields
-	sizeCache       protoimpl.SizeCache
+	// self_prevented_order_ids lists your own resting orders that were cancelled
+	// because this order would otherwise have traded with your own account. The
+	// venue cancels the resting side rather than printing a wash trade, and says
+	// so here — an order silently vanishing from the book would be worse.
+	SelfPreventedOrderIds []int64 `protobuf:"varint,5,rep,packed,name=self_prevented_order_ids,json=selfPreventedOrderIds,proto3" json:"self_prevented_order_ids,omitempty"`
+	unknownFields         protoimpl.UnknownFields
+	sizeCache             protoimpl.SizeCache
 }
 
 func (x *PlaceOrderResponse) Reset() {
@@ -287,6 +292,13 @@ func (x *PlaceOrderResponse) GetRestingQuantity() int64 {
 		return x.RestingQuantity
 	}
 	return 0
+}
+
+func (x *PlaceOrderResponse) GetSelfPreventedOrderIds() []int64 {
+	if x != nil {
+		return x.SelfPreventedOrderIds
+	}
+	return nil
 }
 
 type CancelOrderRequest struct {
@@ -577,12 +589,13 @@ const file_dhukuti_oms_v1_oms_proto_rawDesc = "" +
 	"\x04side\x18\x03 \x01(\x0e2\x14.dhukuti.oms.v1.SideR\x04side\x12-\n" +
 	"\x04type\x18\x04 \x01(\x0e2\x19.dhukuti.oms.v1.OrderTypeR\x04type\x12\x14\n" +
 	"\x05price\x18\x05 \x01(\x03R\x05price\x12\x1a\n" +
-	"\bquantity\x18\x06 \x01(\x03R\bquantity\"\xac\x01\n" +
+	"\bquantity\x18\x06 \x01(\x03R\bquantity\"\xe5\x01\n" +
 	"\x12PlaceOrderResponse\x12\x19\n" +
 	"\border_id\x18\x01 \x01(\x03R\aorderId\x12!\n" +
 	"\flog_position\x18\x02 \x01(\x03R\vlogPosition\x12-\n" +
 	"\x06trades\x18\x03 \x03(\v2\x15.dhukuti.oms.v1.TradeR\x06trades\x12)\n" +
-	"\x10resting_quantity\x18\x04 \x01(\x03R\x0frestingQuantity\"f\n" +
+	"\x10resting_quantity\x18\x04 \x01(\x03R\x0frestingQuantity\x127\n" +
+	"\x18self_prevented_order_ids\x18\x05 \x03(\x03R\x15selfPreventedOrderIds\"f\n" +
 	"\x12CancelOrderRequest\x12\x16\n" +
 	"\x06symbol\x18\x01 \x01(\tR\x06symbol\x12\x19\n" +
 	"\border_id\x18\x02 \x01(\x03R\aorderId\x12\x1d\n" +

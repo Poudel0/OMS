@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"sync"
 	"testing"
 
 	"github.com/Poudel0/OMS/internal/oms"
@@ -306,6 +307,114 @@ func TestLedger_BatchIsAllOrNothing(t *testing.T) {
 		if n != 0 {
 			t.Errorf("EntryCount(trade %d) = %d, want 0 — the batch partially committed", id, n)
 		}
+	}
+}
+
+func TestLedger_BalancesRebuildsFromTheJournal(t *testing.T) {
+	ctx := t.Context()
+	l, symbol := testLedger(t)
+
+	// This is what a restarted node reads: the in-memory pre-trade store dies
+	// with the process, the journal does not.
+	if err := l.Settle(ctx, []oms.Trade{
+		trade(symbol, 1, 500, 10, oms.Buy),
+		trade(symbol, 2, 400, 5, oms.Sell),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	cash, positions, err := l.Balances(ctx)
+	if err != nil {
+		t.Fatalf("Balances() error = %v", err)
+	}
+
+	// 10@500 + 5@400 = 7,000 from buyer to seller; 15 shares the other way.
+	if got := cash["buyer"]; got != -7_000 {
+		t.Errorf("buyer cash = %d, want -7000", got)
+	}
+	if got := cash["seller"]; got != 7_000 {
+		t.Errorf("seller cash = %d, want 7000", got)
+	}
+	if got := positions["buyer"][symbol]; got != 15 {
+		t.Errorf("buyer position = %d, want 15", got)
+	}
+	if got := positions["seller"][symbol]; got != -15 {
+		t.Errorf("seller position = %d, want -15", got)
+	}
+
+	// The rebuilt view must agree with the per-account queries, or one of the
+	// two is lying.
+	for _, account := range []string{"buyer", "seller"} {
+		want, err := l.Balance(ctx, account)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cash[account] != want {
+			t.Errorf("Balances()[%s] = %d, but Balance() says %d", account, cash[account], want)
+		}
+	}
+}
+
+func TestLedger_MigrateIsIdempotentAndRecorded(t *testing.T) {
+	ctx := t.Context()
+	l, _ := testLedger(t) // already migrated once
+
+	// A second run must be a no-op rather than re-applying anything: the record
+	// of a migration and the migration itself commit together.
+	if err := l.Migrate(ctx); err != nil {
+		t.Fatalf("second Migrate() error = %v", err)
+	}
+	if err := l.Migrate(ctx); err != nil {
+		t.Fatalf("third Migrate() error = %v", err)
+	}
+
+	var applied int
+	if err := l.pool.QueryRow(ctx,
+		`SELECT count(*) FROM schema_migrations WHERE name = '0001_journal.sql'`).Scan(&applied); err != nil {
+		t.Fatal(err)
+	}
+	if applied != 1 {
+		t.Errorf("schema_migrations rows for 0001 = %d, want exactly 1", applied)
+	}
+
+	names, err := migrationNames()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var recorded int
+	if err := l.pool.QueryRow(ctx, `SELECT count(*) FROM schema_migrations`).Scan(&recorded); err != nil {
+		t.Fatal(err)
+	}
+	if recorded != len(names) {
+		t.Errorf("recorded %d migrations, want %d (every embedded file)", recorded, len(names))
+	}
+}
+
+func TestLedger_ConcurrentMigrateDoesNotRaceItself(t *testing.T) {
+	ctx := t.Context()
+	l, _ := testLedger(t)
+
+	// Two nodes starting together must not both apply the schema. The advisory
+	// lock plus the re-check inside it is what prevents that.
+	var wg sync.WaitGroup
+	errs := make([]error, 8)
+	for i := range errs {
+		wg.Go(func() { errs[i] = l.Migrate(ctx) })
+	}
+	wg.Wait()
+	for i, err := range errs {
+		if err != nil {
+			t.Errorf("concurrent Migrate() %d error = %v", i, err)
+		}
+	}
+
+	var recorded int
+	if err := l.pool.QueryRow(ctx,
+		`SELECT count(*) FROM schema_migrations WHERE name = '0001_journal.sql'`).Scan(&recorded); err != nil {
+		t.Fatal(err)
+	}
+	if recorded != 1 {
+		t.Errorf("schema_migrations rows = %d, want 1", recorded)
 	}
 }
 

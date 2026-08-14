@@ -31,8 +31,8 @@ import (
 func newTestVenue(t *testing.T, ledger Ledger) (pb.OrderServiceClient, *oms.Accounts) {
 	t.Helper()
 
-	reg := oms.NewRegistry(t.Context(), t.TempDir())
 	accounts := oms.NewAccounts()
+	reg := oms.NewRegistry(t.Context(), t.TempDir(), accounts)
 	srv := NewServer(reg, accounts, ledger, slog.New(slog.DiscardHandler))
 
 	lis := bufconn.Listen(1 << 20)

@@ -1,0 +1,22 @@
+# Per-symbol scaling: same total load (64 workers, 20s) spread across N symbols.
+# WAL on btrfs/LUKS/zstd:3 NVMe. NO ledger, to isolate the sequencer/WAL path.
+# Ryzen 5 4600H, 12 threads.
+
+1 symbol(s): 7012 orders/sec  p50 9.01ms  p99 14.17ms  (140245 accepted)
+2 symbol(s): 4626 orders/sec  p50 12.985ms  p99 28.838ms  (92531 accepted)
+4 symbol(s): 3690 orders/sec  p50 14.713ms  p99 38.237ms  (73811 accepted)
+8 symbol(s): 3134 orders/sec  p50 16.344ms  p99 36.973ms  (62684 accepted)
+# Same sweep, NO WAL (-wal ""): isolates matching parallelism from fsync.
+no-WAL 1 symbol(s): 44954 orders/sec  p50 1.255ms  p99 3.802ms
+no-WAL 2 symbol(s): 41401 orders/sec  p50 1.292ms  p99 4.647ms
+no-WAL 4 symbol(s): 41541 orders/sec  p50 1.291ms  p99 4.681ms
+no-WAL 8 symbol(s): 43091 orders/sec  p50 1.249ms  p99 5.729ms
+
+# READING: with the WAL on, throughput FALLS as symbols rise (7012 -> 3134, 2.2x).
+# Without the WAL it is flat (~41-45k, within noise). So the loss is entirely in
+# durability, not in matching: N sequencers each fsync independently to the SAME
+# device, so N symbols means each group commit batches ~1/N as many orders and
+# the fixed per-fsync cost is amortised that much less. Partitioning buys
+# matching parallelism and COSTS durable throughput on shared storage.
+# Per-symbol batch sizes were not instrumented in this run; the no-WAL control is
+# what pins the cause to fsync rather than to contention.

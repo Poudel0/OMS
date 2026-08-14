@@ -12,6 +12,8 @@ import (
 	"context"
 	"embed"
 	"fmt"
+	"sort"
+	"strings"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -52,22 +54,104 @@ func Open(ctx context.Context, dsn string) (*Ledger, error) {
 // Close releases the connection pool.
 func (l *Ledger) Close() { l.pool.Close() }
 
-// Migrate applies the schema. Every statement is guarded with IF NOT EXISTS, so
-// running it on an up-to-date database is a no-op.
+// Migrate applies every embedded migration that has not been applied yet, in
+// filename order, and records each one.
 //
-// ponytail: this is a one-file schema applied at startup, not a versioned
-// migration tool. It buys correctness for a single table and costs nothing;
-// the moment a column has to change shape on a database that already holds
-// rows, replace it with a real migration runner rather than editing the file.
+// Each migration runs in its own transaction alongside the insert into
+// schema_migrations, so a migration and the record of it either both land or
+// neither does — a migration that succeeded but was not recorded would be
+// re-run, and a recorded one that failed would be skipped forever.
+//
+// The advisory lock means two nodes starting together do not both try to
+// migrate. It is released when the transaction ends.
+//
+// This replaces an earlier version that just re-ran one IF NOT EXISTS file
+// every boot. That was fine while the schema had never been deployed — and it
+// is precisely why fixing the idempotency-key bug in ADR-004 could be a rewrite
+// of 0001 rather than a migration. It stops being fine the moment a column has
+// to change shape on a database that holds rows, which is now.
 func (l *Ledger) Migrate(ctx context.Context) error {
-	sql, err := migrations.ReadFile("migrations/0001_journal.sql")
+	names, err := migrationNames()
 	if err != nil {
-		return fmt.Errorf("ledger: read migration: %w", err)
+		return err
 	}
-	if _, err := l.pool.Exec(ctx, string(sql)); err != nil {
-		return fmt.Errorf("ledger: apply migration: %w", err)
+
+	if _, err := l.pool.Exec(ctx, `
+		CREATE TABLE IF NOT EXISTS schema_migrations (
+			name       TEXT PRIMARY KEY,
+			applied_at TIMESTAMPTZ NOT NULL DEFAULT now()
+		)`); err != nil {
+		return fmt.Errorf("ledger: create schema_migrations: %w", err)
+	}
+
+	for _, name := range names {
+		if err := l.applyMigration(ctx, name); err != nil {
+			return err
+		}
 	}
 	return nil
+}
+
+func (l *Ledger) applyMigration(ctx context.Context, name string) error {
+	body, err := migrations.ReadFile("migrations/" + name)
+	if err != nil {
+		return fmt.Errorf("ledger: read migration %s: %w", name, err)
+	}
+
+	tx, err := l.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("ledger: begin migration %s: %w", name, err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	// Serialise migrating nodes against each other. The number is arbitrary but
+	// must be stable; it identifies this application's migration lock.
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, migrationLockID); err != nil {
+		return fmt.Errorf("ledger: lock for migration %s: %w", name, err)
+	}
+
+	// Re-check inside the lock: another node may have applied it while we waited.
+	var applied bool
+	if err := tx.QueryRow(ctx,
+		`SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)`, name).Scan(&applied); err != nil {
+		return fmt.Errorf("ledger: check migration %s: %w", name, err)
+	}
+	if applied {
+		return nil
+	}
+
+	if _, err := tx.Exec(ctx, string(body)); err != nil {
+		return fmt.Errorf("ledger: apply migration %s: %w", name, err)
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO schema_migrations (name) VALUES ($1)`, name); err != nil {
+		return fmt.Errorf("ledger: record migration %s: %w", name, err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("ledger: commit migration %s: %w", name, err)
+	}
+	return nil
+}
+
+// migrationLockID identifies this application's advisory migration lock. The
+// value is arbitrary; all that matters is that it never changes, and that no
+// other application sharing the database picks the same one.
+const migrationLockID int64 = 8734121
+
+// migrationNames lists the embedded migrations in filename order, which is why
+// they are numbered.
+func migrationNames() ([]string, error) {
+	entries, err := migrations.ReadDir("migrations")
+	if err != nil {
+		return nil, fmt.Errorf("ledger: list migrations: %w", err)
+	}
+	names := make([]string, 0, len(entries))
+	for _, e := range entries {
+		if !e.IsDir() && strings.HasSuffix(e.Name(), ".sql") {
+			names = append(names, e.Name())
+		}
+	}
+	sort.Strings(names)
+	return names, nil
 }
 
 // Settle posts the double-entry rows for every trade, all in one transaction.
@@ -188,6 +272,56 @@ func (l *Ledger) Position(ctx context.Context, account, symbol string) (int64, e
 		return 0, fmt.Errorf("ledger: position for %s in %s: %w", account, symbol, err)
 	}
 	return qty, nil
+}
+
+// Balances rebuilds every account's cash and per-symbol position by summing the
+// whole journal.
+//
+// This is what makes the in-memory pre-trade store (oms.Accounts) survivable
+// across a restart: it is lost on every restart while the journal is not, so a
+// recovering node reads authoritative balances from here and then has the
+// registry restore holds for whatever orders replay put back in the books.
+//
+// It scans the entire journal, which is fine at startup and would not be as a
+// steady-state query. The bound on it is the same one recovery has generally:
+// nothing prunes the journal yet, so both grow together, and snapshots are the
+// answer to both.
+func (l *Ledger) Balances(ctx context.Context) (cash map[string]int64, positions map[string]map[string]int64, err error) {
+	rows, err := l.pool.Query(ctx, `
+		SELECT account_id, asset, symbol,
+		       COALESCE(SUM(amount) FILTER (WHERE direction = 'DEBIT'), 0)
+		     - COALESCE(SUM(amount) FILTER (WHERE direction = 'CREDIT'), 0)
+		FROM journal_entries
+		GROUP BY account_id, asset, symbol`)
+	if err != nil {
+		return nil, nil, fmt.Errorf("ledger: read balances: %w", err)
+	}
+	defer rows.Close()
+
+	cash = make(map[string]int64)
+	positions = make(map[string]map[string]int64)
+	for rows.Next() {
+		var account, asset, symbol string
+		var net int64
+		if err := rows.Scan(&account, &asset, &symbol, &net); err != nil {
+			return nil, nil, fmt.Errorf("ledger: scan balance row: %w", err)
+		}
+		switch asset {
+		case AssetCash:
+			// Cash is not per symbol, so the same account accumulates across
+			// every symbol it has traded.
+			cash[account] += net
+		case AssetPosition:
+			if positions[account] == nil {
+				positions[account] = make(map[string]int64)
+			}
+			positions[account][symbol] += net
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, nil, fmt.Errorf("ledger: iterate balances: %w", err)
+	}
+	return cash, positions, nil
 }
 
 // EntryCount reports how many journal rows exist for one trade. It exists for

@@ -29,6 +29,12 @@ type OrderResponse struct {
 	// or the one the sequencer assigned if the caller left it zero.
 	OrderID SeqID
 	Trades  []Trade
+	// SelfPrevented lists this account's own resting orders that were cancelled
+	// because the incoming order would otherwise have traded with itself. See
+	// Book.SubmitOrder.
+	SelfPrevented []SeqID
+	// RestingQuantity is how much of the order stayed in the book.
+	RestingQuantity int64
 	// QueueLatency is how long the request waited before the sequencer
 	// goroutine started processing its batch — time spent behind other
 	// requests.
@@ -52,16 +58,22 @@ type request struct {
 	cancelBy string // kind == RecordCancel; "" means skip the ownership check
 	seq      int64  // assigned by the sequencer at commit time
 	orderID  SeqID  // assigned by the sequencer at commit time, if it assigns
-	reply    chan result
+	// preErr is set when the order was rejected before it reached the log —
+	// today only by the pre-trade check. Such an order is one the venue never
+	// accepted, so it gets no log position and never touches the book.
+	preErr error
+	reply  chan result
 }
 
 type result struct {
-	seq         int64
-	orderID     SeqID
-	trades      []Trade
-	err         error
-	pickedUpAt  time.Time
-	respondedAt time.Time
+	seq           int64
+	orderID       SeqID
+	trades        []Trade
+	selfPrevented []SeqID
+	restingQty    int64
+	err           error
+	pickedUpAt    time.Time
+	respondedAt   time.Time
 }
 
 // ErrNotOrderOwner reports a cancel for an order placed by a different
@@ -98,26 +110,20 @@ var replyPool = sync.Pool{New: func() any { return make(chan result, 1) }}
 // queued, appends them all to the log, fsyncs once, and only then applies any
 // of them to the book. See ADR-003.
 type Sequencer struct {
-	// OnTrades, if set, is called with every batch of trades as they execute,
-	// from inside the sequencer goroutine. That placement is the point: it is
-	// the only spot where trade order is total, so a market-data feed fed from
-	// here cannot publish trades out of the order they matched in.
-	//
-	// The cost of that guarantee is that OnTrades runs on the critical path and
-	// must not block — a slow subscriber has to be dropped, not waited for.
-	//
-	// Set it before the first Submit and never again. It needs no lock: the
-	// goroutine only reads it while handling a request, which necessarily
-	// happens after the send that delivered that request, which happens after
-	// the write here.
-	OnTrades func([]Trade)
-
 	book *Book
 	wal  *Writer
 	reqs chan request
 	done chan struct{}
 	quit chan struct{}
 	once sync.Once
+
+	// Set once by attach, before the sequencer is published to any caller, and
+	// never written again. They need no lock: the goroutine only reads them
+	// while handling a request, which necessarily happens after the send that
+	// delivered it, which happens after the write in attach.
+	symbol   string
+	accounts *Accounts
+	onTrades func([]Trade)
 
 	// Owned exclusively by the sequencer goroutine.
 	seq         int64
@@ -215,11 +221,36 @@ func (s *Sequencer) commit(batch []request) {
 	// resurrect the order under a different identity and no cancel would ever
 	// find it again.
 	for i := range batch {
-		if batch[i].kind == RecordSubmit && batch[i].order.SeqID == 0 {
+		if batch[i].kind != RecordSubmit {
+			continue
+		}
+		if batch[i].order.SeqID == 0 {
 			s.nextOrderID++
 			batch[i].order.SeqID = s.nextOrderID
 		}
 		batch[i].orderID = batch[i].order.SeqID
+		// One sequencer owns exactly one symbol, so normalise rather than trust
+		// the caller's field. Reservations are keyed by symbol, and a mismatch
+		// here would strand a hold under a key nothing releases.
+		if s.symbol != "" {
+			batch[i].order.Symbol = s.symbol
+		}
+	}
+
+	// Pre-trade check-and-reserve, before anything is logged. A rejected order
+	// is one the venue never accepted, so it must get no log position and never
+	// reach the book — replay does not re-run balance checks, so a rejected
+	// order in the log would be applied on recovery and the recovered book would
+	// diverge from the one that was lost.
+	if s.accounts != nil {
+		for i := range batch {
+			if batch[i].kind != RecordSubmit {
+				continue
+			}
+			if err := s.accounts.Reserve(batch[i].order); err != nil {
+				batch[i].preErr = err
+			}
+		}
 	}
 
 	if s.wal != nil && s.walErr == nil {
@@ -238,14 +269,36 @@ func (s *Sequencer) commit(batch []request) {
 		req := batch[i]
 		res := result{seq: req.seq, orderID: req.orderID, pickedUpAt: pickedUpAt}
 		switch {
+		case req.preErr != nil:
+			// Rejected before the log. Reserve failed, so there is no hold to
+			// release.
+			res.err = req.preErr
 		case s.walErr != nil:
 			res.err = s.walErr
+			// Reserved, then the log refused it. The order is not accepted, so
+			// the hold must go back.
+			s.release(req)
 		case req.kind == RecordCancel:
 			res.err = s.book.CancelOwned(req.cancelID, req.cancelBy)
+			if res.err == nil && s.accounts != nil {
+				s.accounts.Release(s.symbol, req.cancelID)
+			}
 		default:
-			res.trades, res.err = s.book.Submit(req.order)
-			if len(res.trades) > 0 && s.OnTrades != nil {
-				s.OnTrades(res.trades)
+			mr, err := s.book.SubmitOrder(req.order)
+			res.trades, res.selfPrevented, res.restingQty, res.err = mr.Trades, mr.SelfPrevented, mr.RestingQuantity, err
+			if s.accounts != nil {
+				if err != nil {
+					s.release(req)
+				} else {
+					// One atomic step: move the value, shrink both sides' holds
+					// by what actually moved, free the taker's remainder unless
+					// it is still resting, and drop the holds of any resting
+					// orders self-trade prevention cancelled.
+					s.accounts.Complete(s.symbol, req.orderID, mr.Trades, mr.RestingQuantity, mr.SelfPrevented)
+				}
+			}
+			if len(res.trades) > 0 && s.onTrades != nil {
+				s.onTrades(res.trades)
 			}
 		}
 		res.respondedAt = time.Now()
@@ -253,8 +306,27 @@ func (s *Sequencer) commit(batch []request) {
 	}
 }
 
+// release drops a submit's reservation. Cancels never hold one of their own.
+func (s *Sequencer) release(req request) {
+	if s.accounts != nil && req.kind == RecordSubmit {
+		s.accounts.Release(s.symbol, req.orderID)
+	}
+}
+
+// attach wires the per-symbol collaborators a Registry owns. It must be called
+// before the sequencer is handed to any caller, which is what makes writing
+// these fields without a lock safe — see the field comments.
+func (s *Sequencer) attach(symbol string, accounts *Accounts, onTrades func([]Trade)) {
+	s.symbol = symbol
+	s.accounts = accounts
+	s.onTrades = onTrades
+}
+
 func (s *Sequencer) logBatch(batch []request, ts time.Time) error {
 	for i := range batch {
+		if batch[i].preErr != nil {
+			continue // never accepted, so it consumes no log position
+		}
 		s.seq++
 		batch[i].seq = s.seq
 		rec := Record{Seq: s.seq, Kind: batch[i].kind, TS: ts}
@@ -322,11 +394,13 @@ func (s *Sequencer) Submit(ctx context.Context, o Order) (OrderResponse, error) 
 		return OrderResponse{}, err
 	}
 	return OrderResponse{
-		Seq:          res.seq,
-		OrderID:      res.orderID,
-		Trades:       res.trades,
-		QueueLatency: res.pickedUpAt.Sub(sentAt),
-		TotalLatency: res.respondedAt.Sub(sentAt),
+		Seq:             res.seq,
+		OrderID:         res.orderID,
+		Trades:          res.trades,
+		SelfPrevented:   res.selfPrevented,
+		RestingQuantity: res.restingQty,
+		QueueLatency:    res.pickedUpAt.Sub(sentAt),
+		TotalLatency:    res.respondedAt.Sub(sentAt),
 	}, nil
 }
 

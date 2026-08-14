@@ -165,6 +165,19 @@ func (b *Book) BestAsk() (Price, bool) {
 	return 0, false
 }
 
+// RestingOrders returns every order currently resting in the book, in no
+// particular order. It exists so that reservations can be rebuilt after replay:
+// a recovered book has live orders, and their holds have to be restored or the
+// account's available balance would be overstated by exactly the amount its own
+// resting orders have committed.
+func (b *Book) RestingOrders() []Order {
+	out := make([]Order, 0, len(b.index))
+	for _, ref := range b.index {
+		out = append(out, ref.element.Value.(Order))
+	}
+	return out
+}
+
 // MaxOrderID reports the highest order ID this book has seen, including orders
 // that have since filled or been cancelled. A sequencer that assigns order IDs
 // resumes from here after recovery so it cannot reissue an ID that a resting
@@ -228,32 +241,78 @@ func levelQuantity(lvl *priceLevel) int64 {
 // order's unfilled remainder rests in the book; a MARKET order's unfilled
 // remainder is dropped — there is no price at which it would wait.
 func (b *Book) Submit(o Order) (trades []Trade, err error) {
+	res, err := b.SubmitOrder(o)
+	return res.Trades, err
+}
+
+// MatchResult is everything one Submit did to the book.
+type MatchResult struct {
+	Trades []Trade
+	// SelfPrevented lists resting orders cancelled because the incoming order
+	// would otherwise have traded with its own account. They are reported
+	// rather than dropped silently: the owner needs to know its resting order
+	// is gone, and since it is the same account as the taker, the taker's
+	// response is the right place to tell it.
+	SelfPrevented []SeqID
+	// RestingQuantity is how much of o stayed in the book.
+	RestingQuantity int64
+}
+
+// SubmitOrder is Submit with the full result. Submit exists alongside it to
+// keep the OrderBook interface (and the benchmarks, and MutexBook) unchanged.
+//
+// Self-trade prevention policy: when an incoming order would match a resting
+// order from the same account, the resting order is **cancelled** and matching
+// continues. No trade prints between one account and itself.
+//
+// Cancelling the resting side (rather than rejecting the incoming order) is
+// what keeps the book uncrossed. Refusing to match and resting the taker
+// anyway would leave a bid at or above an ask, breaking the invariant every
+// other part of this package relies on. It is also a policy real venues offer —
+// CME calls it self-match prevention with cancel-resting — so it is a choice
+// with precedent rather than an invention.
+//
+// An order with an empty Placer never self-matches. Empty means "no account",
+// which is the internal and test path; every order arriving over gRPC has a
+// non-empty account_id enforced at the boundary.
+func (b *Book) SubmitOrder(o Order) (MatchResult, error) {
 	if o.Side == UnknownSide || o.Type == UnknownType {
-		return nil, errors.New("oms: order has unknown side or type")
+		return MatchResult{}, errors.New("oms: order has unknown side or type")
 	}
 	if o.SeqID > b.maxOrderID {
 		b.maxOrderID = o.SeqID
 	}
+
+	var res MatchResult
+	var err error
 	switch o.Side {
 	case Buy:
-		trades, o, err = b.matchAgainstAsks(o)
+		res.Trades, res.SelfPrevented, o, err = b.matchAgainstAsks(o)
 	case Sell:
-		trades, o, err = b.matchAgainstBids(o)
+		res.Trades, res.SelfPrevented, o, err = b.matchAgainstBids(o)
 	}
 	if err != nil {
-		return trades, err
+		return res, err
 	}
 	if o.Type == Limit && o.Quantity > 0 {
 		lvl := b.getOrCreateLevel(o.Side, o.Price)
 		e := lvl.push(o)
 		b.index[o.SeqID] = OrderRef{level: lvl, element: e}
+		res.RestingQuantity = o.Quantity
 	}
 	// ponytail: unfilled MARKET remainder is dropped, not logged/persisted — revisit if an audit trail becomes a requirement
-	return trades, nil
+	return res, nil
+}
+
+// selfMatch reports whether these two orders belong to the same account. An
+// empty account is treated as "not the same as anything", including another
+// empty one — see SubmitOrder.
+func selfMatch(taker, maker Order) bool {
+	return taker.Placer != "" && taker.Placer == maker.Placer
 }
 
 // matchAgainstAsks matches a Buy taker against resting Sell orders.
-func (b *Book) matchAgainstAsks(taker Order) (trades []Trade, remainder Order, err error) {
+func (b *Book) matchAgainstAsks(taker Order) (trades []Trade, selfPrevented []SeqID, remainder Order, err error) {
 	for taker.Quantity > 0 {
 		askingPrice, ok := b.BestAsk()
 		if !ok {
@@ -265,6 +324,17 @@ func (b *Book) matchAgainstAsks(taker Order) (trades []Trade, remainder Order, e
 		lvl := b.levels[askingPrice]
 		maker, _ := lvl.popFront()
 		delete(b.index, maker.SeqID)
+
+		if selfMatch(taker, maker) {
+			// The maker is already popped and de-indexed, so simply not
+			// restoring it is the cancellation. Matching continues to the next
+			// resting order at this price, or the next level.
+			selfPrevented = append(selfPrevented, maker.SeqID)
+			if lvl.orders.Len() == 0 {
+				b.removeLevel(Sell, askingPrice)
+			}
+			continue
+		}
 
 		fill := min(taker.Quantity, maker.Quantity)
 
@@ -293,11 +363,11 @@ func (b *Book) matchAgainstAsks(taker Order) (trades []Trade, remainder Order, e
 			b.removeLevel(Sell, askingPrice)
 		}
 	}
-	return trades, taker, nil
+	return trades, selfPrevented, taker, nil
 }
 
 // matchAgainstBids matches a Sell taker against resting Buy orders.
-func (b *Book) matchAgainstBids(taker Order) (trades []Trade, remainder Order, err error) {
+func (b *Book) matchAgainstBids(taker Order) (trades []Trade, selfPrevented []SeqID, remainder Order, err error) {
 	for taker.Quantity > 0 {
 		biddingPrice, ok := b.BestBid()
 		if !ok {
@@ -309,6 +379,14 @@ func (b *Book) matchAgainstBids(taker Order) (trades []Trade, remainder Order, e
 		lvl := b.levels[biddingPrice]
 		maker, _ := lvl.popFront()
 		delete(b.index, maker.SeqID)
+
+		if selfMatch(taker, maker) {
+			selfPrevented = append(selfPrevented, maker.SeqID)
+			if lvl.orders.Len() == 0 {
+				b.removeLevel(Buy, biddingPrice)
+			}
+			continue
+		}
 
 		fill := min(taker.Quantity, maker.Quantity)
 
@@ -337,7 +415,7 @@ func (b *Book) matchAgainstBids(taker Order) (trades []Trade, remainder Order, e
 			b.removeLevel(Buy, biddingPrice)
 		}
 	}
-	return trades, taker, nil
+	return trades, selfPrevented, taker, nil
 }
 
 // Cancel removes a resting order by SeqID in O(1) via the index backref.

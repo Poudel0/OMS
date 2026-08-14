@@ -85,10 +85,29 @@ background load).
   one in the WAL, one in Postgres's own commit. The obvious next lever is
   batching settlement the way the WAL already batches appends — one transaction
   per group commit rather than per order.
-- **This does not demonstrate per-symbol scaling.** Proving ADR-005's
-  partitioning claim needs the same total load spread across 1/2/4/8 symbols,
-  which has not been run. Expect less than linear: every symbol's group commit
-  fsyncs to the same physical device, and four sequencers do not get four disks.
+- **Per-symbol partitioning makes durable throughput WORSE, and that was not the
+  expectation.** Same total load across a rising symbol count
+  (`docs/bench/week4-symbol-scaling.txt`, 64 clients, 20s):
+
+  | Symbols | With WAL | Without WAL |
+  |---|---|---|
+  | 1 | **7,012/sec** | 44,954/sec |
+  | 2 | 4,626 | 41,401 |
+  | 4 | 3,690 | 41,541 |
+  | 8 | **3,134** | 43,091 |
+
+  Durable throughput falls 2.2× while the no-WAL control stays flat within noise.
+  So matching parallelism is real and the loss is entirely in durability: it is
+  **group-commit fragmentation**. One symbol queues all 64 clients into one
+  sequencer, so each fsync amortises across a big batch; eight symbols give each
+  sequencer ~8 clients and eight independent fsync streams contending for a device
+  that serialises them anyway. More partitions → smaller batches → less
+  throughput.
+
+  Operational conclusion, the reverse of the intuitive one: **on a single device,
+  fewer symbols per node is better for durable throughput.** Scaling out means
+  more devices or more nodes, not more goroutines. See
+  [ADR-005](adr/0005-multi-symbol-partitioning.md).
 - **The load test found two bugs the unit tests could not**, both recorded in
   [ADR-004](adr/0004-synchronous-settlement.md): a settlement context that
   inherited client cancellation, and an idempotency key that silently dropped

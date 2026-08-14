@@ -84,25 +84,60 @@ explicitly out of scope — so the check is only as strong as the `account_id` t
 caller sent. It is still worth having now: adding authentication later makes it
 real without changing the logic around it.
 
-## Measured
+## Measured — and partitioning makes durable throughput *worse*
 
-64 concurrent gRPC clients spread across 4 symbols, 30 seconds
-(`docs/bench/week4-grpc-loadtest.txt`): 1,973 orders/sec durable end-to-end,
-3,910 without the ledger.
+The same total load (64 gRPC clients, 20 s) spread across a rising number of
+symbols (`docs/bench/week4-symbol-scaling.txt`):
 
-Honest reading of that number: **it does not demonstrate the partitioning
-speed-up.** Per-symbol scaling would show as throughput rising with symbol
-count, and the measurement that would prove it — the same total load spread
-across 1, 2, 4, 8 symbols — has not been run. What the load test does show is
-that four independent sequencers, four logs, and four fsync streams coexist
-correctly under concurrent load, with a journal that balances to the row.
+| Symbols | With WAL | p99 | Without WAL | p99 |
+|---|---|---|---|---|
+| 1 | **7,012 orders/sec** | 14.2 ms | 44,954 orders/sec | 3.8 ms |
+| 2 | 4,626 | 28.8 ms | 41,401 | 4.6 ms |
+| 4 | 3,690 | 38.2 ms | 41,541 | 4.7 ms |
+| 8 | **3,134** | 37.0 ms | 43,091 | 5.7 ms |
 
-There is also a reason to expect the speed-up to be smaller than the goroutine
-count suggests: every symbol's group commit fsyncs to the *same physical
-device*, and ADR-003 established that one fsync is ~3.4 ms on this stack. Four
-symbols do not get four independent disks. Cross-symbol parallelism is real for
-matching and for the in-memory book, and partly shared for durability. That
-distinction belongs in the Week 6 numbers, measured rather than assumed.
+Durable throughput **falls 2.2× as symbols rise**, and p99 nearly triples. The
+expectation going in was that it would rise, or at worst flatten. It does the
+opposite.
+
+The no-WAL column is what identifies the cause. Without durability, symbol count
+is flat within noise (41–45k/sec): matching genuinely does not care how many
+symbols it is spread over, which is the partitioning claim holding exactly as
+designed. Every bit of the loss is in durability.
+
+The mechanism is **group-commit fragmentation**, and it is ADR-003's finding
+pointing the other way. Group commit works by amortising one fsync across every
+request queued behind the first. With one symbol, all 64 clients queue into *one*
+sequencer, so each fsync serves a large batch. With eight symbols, each sequencer
+sees ~8 clients, so each fsync serves roughly an eighth as many orders — and
+there are now eight independent fsync streams contending for one device that
+serialises them anyway. More partitions, smaller batches, same total device
+capacity, less throughput.
+
+So the honest statement of what partitioning buys:
+
+- **Matching parallelism: real.** Confirmed by the flat no-WAL sweep.
+- **Isolation: real.** A symbol's book, log, and identity sequences are its own,
+  and one symbol's load cannot touch another's correctness.
+- **Durable throughput: negative, on shared storage.** Partitioning divides the
+  batching that durability depends on.
+
+Which means the operational conclusion is the reverse of the intuitive one:
+**on a single device, fewer symbols per node is better for durable throughput.**
+Scaling out is a matter of more devices or more nodes — a per-symbol WAL on its
+own spindle, or symbols split across machines — not of more goroutines. That is
+worth knowing before Week 6 quotes a headline number, and it is the sort of thing
+only measuring the sweep would have surfaced.
+
+Per-symbol batch sizes were not instrumented in this run. `Sequencer.CommitStats`
+reports them but is not exposed over gRPC, so the no-WAL control is what pins the
+cause to fsync rather than to lock contention or scheduling. Wiring that ratio
+into the Week 6 metrics endpoint would turn the explanation above from
+well-supported into directly observed.
+
+For reference, the end-to-end number with settlement included, 4 symbols, 30 s
+(`docs/bench/week4-grpc-loadtest.txt`): 1,973 orders/sec durable, 3,910 without
+the ledger, with a journal that balances to the row.
 
 ## Consequences
 

@@ -84,11 +84,14 @@ func NewServer(reg *oms.Registry, accounts *oms.Accounts, ledger Ledger, log *sl
 
 // onTrades runs on the sequencer goroutine for the symbol that produced the
 // trades, in matching order. Everything it does must be non-blocking, which is
-// why in-memory settlement happens here and the durable ledger write does not:
-// a database round trip on this path would put an unbounded stall between the
-// matcher and its next order.
+// why the durable ledger write does not happen here: a database round trip on
+// this path would put an unbounded stall between the matcher and its next order.
+//
+// In-memory balances are *not* updated here. The sequencer does that itself, in
+// the same atomic step that reconciles the order's reservation — splitting the
+// two would leave a window where `owned - reserved` was wrong, which is the
+// whole class of bug reservations exist to close.
 func (s *Server) onTrades(symbol string, trades []oms.Trade) {
-	s.accounts.Settle(trades)
 	s.feed(symbol).publish(symbol, trades)
 }
 
@@ -116,13 +119,13 @@ func (s *Server) PlaceOrder(ctx context.Context, req *pb.PlaceOrderRequest) (*pb
 		return nil, registryError(err)
 	}
 
-	// The inline pre-trade check. It runs before the order reaches the
-	// sequencer so a rejected order never enters the log at all — the log is
-	// for mutations the venue accepted.
-	if err := s.accounts.Check(order); err != nil {
-		return nil, accountError(err)
-	}
-
+	// The inline pre-trade check happens inside the sequencer, not here. It has
+	// to: checking here and matching there leaves a gap in which a second order
+	// from the same account can pass the same check, and a *resting* order has
+	// spent nothing yet, so no amount of serialising the checks would help. The
+	// sequencer does an atomic check-and-reserve against
+	// `owned - already committed`, before the order is logged — see
+	// oms.Accounts. Its rejection arrives here as a Submit error.
 	resp, err := seq.Submit(ctx, order)
 	if err != nil {
 		return nil, submitError(err)
@@ -153,10 +156,11 @@ func (s *Server) PlaceOrder(ctx context.Context, req *pb.PlaceOrderRequest) (*pb
 	}
 
 	return &pb.PlaceOrderResponse{
-		OrderId:         int64(resp.OrderID),
-		LogPosition:     resp.Seq,
-		Trades:          tradesToPB(resp.Trades),
-		RestingQuantity: restingQuantity(order, resp.Trades),
+		OrderId:               int64(resp.OrderID),
+		LogPosition:           resp.Seq,
+		Trades:                tradesToPB(resp.Trades),
+		RestingQuantity:       resp.RestingQuantity,
+		SelfPreventedOrderIds: seqIDsToInt64(resp.SelfPrevented),
 	}, nil
 }
 
@@ -310,17 +314,16 @@ func validateAccountID(account string) (string, error) {
 	return account, nil
 }
 
-// restingQuantity reports how much of the order stayed in the book. A market
-// order's remainder is dropped rather than rested, so it is always 0.
-func restingQuantity(o oms.Order, trades []oms.Trade) int64 {
-	if o.Type == oms.Market {
-		return 0
+// seqIDsToInt64 converts order IDs for the wire.
+func seqIDsToInt64(ids []oms.SeqID) []int64 {
+	if len(ids) == 0 {
+		return nil
 	}
-	remaining := o.Quantity
-	for _, t := range trades {
-		remaining -= t.Quantity
+	out := make([]int64, 0, len(ids))
+	for _, id := range ids {
+		out = append(out, int64(id))
 	}
-	return remaining
+	return out
 }
 
 func registryError(err error) error {
@@ -334,19 +337,15 @@ func registryError(err error) error {
 	}
 }
 
-func accountError(err error) error {
+func submitError(err error) error {
 	switch {
+	// The pre-trade check runs inside the sequencer, so its rejections arrive
+	// as Submit errors and have to be mapped to client-meaningful codes here
+	// rather than being flattened into Internal.
 	case errors.Is(err, oms.ErrUnknownAccount):
 		return status.Errorf(codes.NotFound, "%v", err)
 	case errors.Is(err, oms.ErrInsufficientFunds), errors.Is(err, oms.ErrInsufficientShares):
 		return status.Errorf(codes.FailedPrecondition, "%v", err)
-	default:
-		return status.Errorf(codes.InvalidArgument, "%v", err)
-	}
-}
-
-func submitError(err error) error {
-	switch {
 	case errors.Is(err, oms.ErrSequencerClosed):
 		return status.Error(codes.Unavailable, "venue is shutting down")
 	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
