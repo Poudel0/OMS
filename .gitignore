@@ -1,8 +1,13 @@
-*.md
-*.xlsx
+# personal sprint-planning artifacts, not part of the deliverable
+/CLAUDE.md
+/dhukuti_oms_v1_sprint.md
+/dhukuti_oms_v1_sprint.xlsx
+/Docs/
+
+# build artifacts
+/bench
+/server
+*.log
+
+# editor
 .idea/
-.github/
-Docs/
-.log
-bench*
-*lock*

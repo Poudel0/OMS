@@ -20,6 +20,6 @@ func main() {
 	for e := l.Front(); e != nil; e = e.Next() {
 		fmt.Print(e.Value, " ") // 2 0 88 99
 	}
-	
+
 	fmt.Println("\nlen:", l.Len()) // 4
 }
